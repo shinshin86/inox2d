@@ -51,6 +51,23 @@ impl InoxNodeTree {
 		Some(self.get_internal_node(id)?.get())
 	}
 
+	pub fn find_node_by_name(&self, name: &str) -> Option<InoxNodeUuid> {
+		self.pre_order_iter()
+			.find(|node| node.name == name)
+			.map(|node| node.uuid)
+	}
+
+	pub fn find_first_node_by_names(&self, names: &[&str]) -> Option<InoxNodeUuid> {
+		names.iter().find_map(|name| self.find_node_by_name(name))
+	}
+
+	pub fn find_nodes_by_names(&self, names: &[&str]) -> Vec<InoxNodeUuid> {
+		self.pre_order_iter()
+			.filter(|node| names.iter().any(|name| node.name == *name))
+			.map(|node| node.uuid)
+			.collect()
+	}
+
 	pub fn get_node_mut(&mut self, id: InoxNodeUuid) -> Option<&mut InoxNode> {
 		Some(self.get_internal_node_mut(id)?.get_mut())
 	}
@@ -92,5 +109,43 @@ impl InoxNodeTree {
 			.unwrap()
 			.children(&self.arena)
 			.map(|id| self.arena.get(id).unwrap().get())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::InoxNodeTree;
+	use crate::math::transform::TransformOffset;
+	use crate::node::{InoxNode, InoxNodeUuid};
+
+	fn node(uuid: u32, name: &str) -> InoxNode {
+		InoxNode {
+			uuid: InoxNodeUuid(uuid),
+			name: name.to_owned(),
+			enabled: true,
+			zsort: 0.0,
+			trans_offset: TransformOffset::default(),
+			lock_to_root: false,
+		}
+	}
+
+	#[test]
+	fn find_first_node_by_names_respects_candidate_order() {
+		let mut tree = InoxNodeTree::new_with_root(node(1, "Root"));
+		tree.add(InoxNodeUuid(1), InoxNodeUuid(2), node(2, "Neck"));
+		tree.add(InoxNodeUuid(2), InoxNodeUuid(3), node(3, "Face"));
+
+		assert!(tree.find_first_node_by_names(&["Head", "Neck", "Face"]) == Some(InoxNodeUuid(2)));
+		assert!(tree.find_first_node_by_names(&["Head"]).is_none());
+	}
+
+	#[test]
+	fn find_nodes_by_names_collects_all_matching_nodes() {
+		let mut tree = InoxNodeTree::new_with_root(node(1, "Root"));
+		tree.add(InoxNodeUuid(1), InoxNodeUuid(2), node(2, "Neck"));
+		tree.add(InoxNodeUuid(2), InoxNodeUuid(3), node(3, "Face"));
+		tree.add(InoxNodeUuid(3), InoxNodeUuid(4), node(4, "Neck"));
+
+		assert!(tree.find_nodes_by_names(&["Neck", "Face"]) == vec![InoxNodeUuid(2), InoxNodeUuid(3), InoxNodeUuid(4)]);
 	}
 }

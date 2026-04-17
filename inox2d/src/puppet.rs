@@ -5,8 +5,12 @@ mod world;
 
 use std::collections::HashMap;
 
+use glam::{Vec2, Vec3};
+
+use crate::math::transform::TransformOffset;
+use crate::node::components::TransformStore;
 use crate::node::{InoxNode, InoxNodeUuid};
-use crate::params::{Param, ParamCtx};
+use crate::params::{Param, ParamCtx, SetParamError};
 use crate::physics::{PhysicsCtx, PuppetPhysics};
 use crate::render::RenderCtx;
 
@@ -22,6 +26,7 @@ pub struct Puppet {
 	physics_ctx: Option<PhysicsCtx>,
 	pub(crate) nodes: InoxNodeTree,
 	pub(crate) node_comps: World,
+	physics_input_offsets: HashMap<InoxNodeUuid, TransformOffset>,
 	/// Currently only a marker for if transform/zsort components are initialized.
 	pub(crate) transform_ctx: Option<TransformCtx>,
 	/// Context for rendering this puppet. See `.init_rendering()`.
@@ -44,6 +49,7 @@ impl Puppet {
 			physics_ctx: None,
 			nodes: InoxNodeTree::new_with_root(root),
 			node_comps: World::new(),
+			physics_input_offsets: HashMap::new(),
 			transform_ctx: None,
 			render_ctx: None,
 			params,
@@ -106,6 +112,166 @@ impl Puppet {
 		self.physics_ctx = Some(physics_ctx);
 	}
 
+	/// Apply a physics-only transform offset to a node.
+	///
+	/// The offset participates in the transform sampled by physics, but does not remain in the final rendered pose.
+	pub fn set_physics_input_offset(
+		&mut self,
+		node: InoxNodeUuid,
+		offset: TransformOffset,
+	) -> Result<(), SetPhysicsInputOffsetError> {
+		if self.nodes.get_node(node).is_none() {
+			return Err(SetPhysicsInputOffsetError::NoNodeWithUuid(node.0));
+		}
+
+		if is_identity_offset(&offset) {
+			self.physics_input_offsets.remove(&node);
+		} else {
+			self.physics_input_offsets.insert(node, offset);
+		}
+
+		Ok(())
+	}
+
+	/// Convenience wrapper around [`Puppet::set_physics_input_offset`] using a node name lookup.
+	pub fn set_physics_input_offset_by_name(
+		&mut self,
+		node_name: &str,
+		offset: TransformOffset,
+	) -> Result<(), SetPhysicsInputOffsetError> {
+		let Some(node) = self.nodes.find_node_by_name(node_name) else {
+			return Err(SetPhysicsInputOffsetError::NoNodeNamed(node_name.to_owned()));
+		};
+
+		self.set_physics_input_offset(node, offset)
+	}
+
+	/// Resolve the first available node from a list of candidate names and apply a physics-only transform offset.
+	pub fn set_physics_input_offset_by_name_candidates(
+		&mut self,
+		node_names: &[&str],
+		offset: TransformOffset,
+	) -> Result<InoxNodeUuid, SetPhysicsInputOffsetError> {
+		let Some(node) = self.nodes.find_first_node_by_names(node_names) else {
+			return Err(SetPhysicsInputOffsetError::NoNodesNamed(
+				node_names.iter().map(|name| (*name).to_owned()).collect(),
+			));
+		};
+
+		self.set_physics_input_offset(node, offset)?;
+		Ok(node)
+	}
+
+	/// Apply the same physics-only transform offset to every node whose name matches any candidate.
+	pub fn set_physics_input_offsets_by_names(
+		&mut self,
+		node_names: &[&str],
+		offset: TransformOffset,
+	) -> Result<Vec<InoxNodeUuid>, SetPhysicsInputOffsetError> {
+		let nodes = self.nodes.find_nodes_by_names(node_names);
+		if nodes.is_empty() {
+			return Err(SetPhysicsInputOffsetError::NoNodesNamed(
+				node_names.iter().map(|name| (*name).to_owned()).collect(),
+			));
+		}
+
+		for node in &nodes {
+			self.set_physics_input_offset(*node, offset.clone())?;
+		}
+
+		Ok(nodes)
+	}
+
+	pub fn clear_physics_input_offsets(&mut self) {
+		self.physics_input_offsets.clear();
+	}
+
+	/// Apply parameter overrides after physics and rebuild render transforms for the current frame.
+	///
+	/// This is intended for runtime-side presentation adjustments that should win over
+	/// physics output only for the final rendered pose.
+	pub fn apply_post_physics_param_overrides(
+		&mut self,
+		overrides: &HashMap<String, Vec2>,
+	) -> Result<(), SetParamError> {
+		if overrides.is_empty() {
+			return Ok(());
+		}
+
+		for (param_name, value) in overrides {
+			self.param_ctx
+				.as_mut()
+				.expect("Post-physics param overrides depend on initialized params.")
+				.set(param_name, *value)?;
+		}
+
+		self.render_ctx
+			.as_mut()
+			.expect("Post-physics param overrides depend on initialized rendering.")
+			.reset(&self.nodes, &mut self.node_comps);
+		self.transform_ctx
+			.as_mut()
+			.expect("Post-physics param overrides depend on initialized transforms.")
+			.reset(&self.nodes, &mut self.node_comps);
+		self
+			.param_ctx
+			.as_ref()
+			.expect("Post-physics param overrides depend on initialized params.")
+			.apply(&self.params, &self.nodes, &mut self.node_comps);
+		self
+			.transform_ctx
+			.as_mut()
+			.expect("Post-physics param overrides depend on initialized transforms.")
+			.update(&self.nodes, &mut self.node_comps);
+		Ok(())
+	}
+
+	/// Apply visible transform offsets after physics for the final rendered pose.
+	pub fn apply_post_physics_transform_offsets_by_names(
+		&mut self,
+		node_names: &[&str],
+		offset: &TransformOffset,
+	) -> Result<Vec<InoxNodeUuid>, SetPhysicsInputOffsetError> {
+		let nodes = self.nodes.find_nodes_by_names(node_names);
+		if nodes.is_empty() {
+			return Err(SetPhysicsInputOffsetError::NoNodesNamed(
+				node_names.iter().map(|name| (*name).to_owned()).collect(),
+			));
+		}
+
+		for node in &nodes {
+			let Some(transform) = self.node_comps.get_mut::<TransformStore>(*node) else {
+				continue;
+			};
+
+			transform.relative.translation += offset.translation;
+			transform.relative.rotation += offset.rotation;
+			transform.relative.scale *= offset.scale;
+			transform.relative.pixel_snap |= offset.pixel_snap;
+		}
+
+		self
+			.transform_ctx
+			.as_mut()
+			.expect("Post-physics transform offsets depend on initialized transforms.")
+			.update(&self.nodes, &mut self.node_comps);
+
+		Ok(nodes)
+	}
+
+	fn apply_physics_input_offsets(&mut self) {
+		for (node, offset) in &self.physics_input_offsets {
+			let Some(transform) = self.node_comps.get_mut::<TransformStore>(*node) else {
+				continue;
+			};
+
+			transform.relative.translation += offset.translation;
+			transform.relative.rotation += offset.rotation;
+			transform.relative.scale *= offset.scale;
+			transform.relative.pixel_snap |= offset.pixel_snap;
+		}
+	}
+
 	/// Prepare the puppet for a new frame. User may set params afterwards.
 	pub fn begin_frame(&mut self) {
 		if let Some(render_ctx) = self.render_ctx.as_mut() {
@@ -127,6 +293,10 @@ impl Puppet {
 	pub fn end_frame(&mut self, dt: f32) {
 		if let Some(param_ctx) = self.param_ctx.as_mut() {
 			param_ctx.apply(&self.params, &self.nodes, &mut self.node_comps);
+		}
+
+		if self.physics_ctx.is_some() {
+			self.apply_physics_input_offsets();
 		}
 
 		if let Some(transform_ctx) = self.transform_ctx.as_mut() {
@@ -167,4 +337,19 @@ impl Puppet {
 			render_ctx.update(&self.nodes, &mut self.node_comps);
 		}
 	}
+}
+
+fn is_identity_offset(offset: &TransformOffset) -> bool {
+	offset.translation == Vec3::ZERO && offset.rotation == Vec3::ZERO && offset.scale == Vec2::ONE && !offset.pixel_snap
+}
+
+/// Possible errors configuring physics-only transform input.
+#[derive(Debug, thiserror::Error)]
+pub enum SetPhysicsInputOffsetError {
+	#[error("No node named {0}")]
+	NoNodeNamed(String),
+	#[error("No nodes named any of {0:?}")]
+	NoNodesNamed(Vec<String>),
+	#[error("No node with uuid {0}")]
+	NoNodeWithUuid(u32),
 }
