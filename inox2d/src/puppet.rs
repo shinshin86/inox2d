@@ -354,3 +354,121 @@ pub enum SetPhysicsInputOffsetError {
 	#[error("No node with uuid {0}")]
 	NoNodeWithUuid(u32),
 }
+
+#[cfg(test)]
+mod tests {
+	use std::collections::HashMap;
+
+	use glam::{vec2, Vec2};
+
+	use super::*;
+	use crate::math::interp::InterpolateMode;
+	use crate::math::matrix::Matrix2d;
+	use crate::node::{InoxNode, InoxNodeUuid};
+	use crate::params::{AxisPoints, Binding, BindingValues, Param, ParamUuid};
+	use crate::physics::PuppetPhysics;
+	use crate::puppet::meta::PuppetMeta;
+
+	fn node(uuid: u32, name: &str) -> InoxNode {
+		InoxNode {
+			uuid: InoxNodeUuid(uuid),
+			name: name.to_owned(),
+			enabled: true,
+			zsort: 0.0,
+			trans_offset: TransformOffset::default(),
+			lock_to_root: false,
+		}
+	}
+
+	fn meta() -> PuppetMeta {
+		PuppetMeta {
+			name: None,
+			version: crate::INOCHI2D_SPEC_VERSION.to_owned(),
+			rigger: None,
+			artist: None,
+			rights: None,
+			copyright: None,
+			license_url: None,
+			contact: None,
+			reference: None,
+			thumbnail_id: None,
+			preserve_pixels: false,
+		}
+	}
+
+	fn mouth_param(target: InoxNodeUuid) -> Param {
+		Param {
+			uuid: ParamUuid(10),
+			name: "ParamMouthOpenY".to_owned(),
+			is_vec2: false,
+			min: Vec2::ZERO,
+			max: Vec2::ONE,
+			defaults: Vec2::ZERO,
+			axis_points: AxisPoints {
+				x: vec![0.0, 1.0],
+				y: vec![0.0],
+			},
+			bindings: vec![Binding {
+				node: target,
+				is_set: Matrix2d::default_filled(2, 1, false),
+				interpolate_mode: InterpolateMode::Linear,
+				values: BindingValues::TransformTX(Matrix2d::from_slice_vecs(&[vec![0.0, 10.0]], false).unwrap()),
+			}],
+		}
+	}
+
+	#[test]
+	fn post_physics_param_override_rebuilds_render_pose_from_reset_state() {
+		let root = InoxNodeUuid(1);
+		let mouth = InoxNodeUuid(2);
+		let mut params = HashMap::new();
+		params.insert("ParamMouthOpenY".to_owned(), mouth_param(mouth));
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			params,
+		);
+		puppet.nodes.add(root, mouth, node(mouth.0, "Mouth"));
+		puppet.init_transforms();
+		puppet.init_rendering();
+		puppet.init_params();
+
+		puppet.begin_frame();
+		puppet
+			.param_ctx
+			.as_mut()
+			.unwrap()
+			.set("ParamMouthOpenY", vec2(0.2, 0.0))
+			.unwrap();
+		puppet.end_frame(0.0);
+		assert_eq!(
+			puppet
+				.node_comps
+				.get::<TransformStore>(mouth)
+				.unwrap()
+				.relative
+				.translation
+				.x,
+			2.0
+		);
+
+		let mut overrides = HashMap::new();
+		overrides.insert("ParamMouthOpenY".to_owned(), vec2(0.8, 0.0));
+		puppet.apply_post_physics_param_overrides(&overrides).unwrap();
+
+		assert_eq!(
+			puppet
+				.node_comps
+				.get::<TransformStore>(mouth)
+				.unwrap()
+				.relative
+				.translation
+				.x,
+			8.0
+		);
+	}
+}

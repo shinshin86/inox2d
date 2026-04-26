@@ -213,6 +213,113 @@ impl RenderCtx {
 	}
 }
 
+#[cfg(test)]
+mod tests {
+	use std::collections::HashMap;
+
+	use glam::{Vec2, Vec3};
+
+	use super::*;
+	use crate::math::transform::TransformOffset;
+	use crate::node::{
+		components::{BlendMode, Blending, Drawable, Mesh, TexturedMesh},
+		InoxNode,
+	};
+	use crate::physics::PuppetPhysics;
+	use crate::puppet::meta::PuppetMeta;
+	use crate::texture::TextureId;
+
+	fn node(uuid: u32, name: &str, enabled: bool) -> InoxNode {
+		InoxNode {
+			uuid: InoxNodeUuid(uuid),
+			name: name.to_owned(),
+			enabled,
+			zsort: 0.0,
+			trans_offset: TransformOffset::default(),
+			lock_to_root: false,
+		}
+	}
+
+	fn meta() -> PuppetMeta {
+		PuppetMeta {
+			name: None,
+			version: crate::INOCHI2D_SPEC_VERSION.to_owned(),
+			rigger: None,
+			artist: None,
+			rights: None,
+			copyright: None,
+			license_url: None,
+			contact: None,
+			reference: None,
+			thumbnail_id: None,
+			preserve_pixels: false,
+		}
+	}
+
+	fn add_mesh_drawable(puppet: &mut Puppet, id: InoxNodeUuid) {
+		puppet.node_comps.add(
+			id,
+			Drawable {
+				blending: Blending {
+					mode: BlendMode::Normal,
+					tint: Vec3::ONE,
+					screen_tint: Vec3::ZERO,
+					opacity: 1.0,
+				},
+				masks: None,
+			},
+		);
+		puppet.node_comps.add(
+			id,
+			TexturedMesh {
+				tex_albedo: TextureId(0),
+				tex_emissive: TextureId(0),
+				tex_bumpmap: TextureId(0),
+			},
+		);
+		puppet.node_comps.add(
+			id,
+			Mesh {
+				vertices: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+				uvs: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+				indices: vec![0, 1, 2],
+				origin: Vec2::ZERO,
+			},
+		);
+	}
+
+	#[test]
+	fn disabled_drawable_nodes_do_not_enter_render_buffers() {
+		let root = InoxNodeUuid(1);
+		let enabled = InoxNodeUuid(2);
+		let disabled = InoxNodeUuid(3);
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root", true),
+			HashMap::new(),
+		);
+		puppet.nodes.add(root, enabled, node(enabled.0, "Mouth", true));
+		puppet
+			.nodes
+			.add(root, disabled, node(disabled.0, "DisabledMouth", false));
+		add_mesh_drawable(&mut puppet, enabled);
+		add_mesh_drawable(&mut puppet, disabled);
+
+		puppet.init_transforms();
+		puppet.init_rendering();
+
+		let render_ctx = puppet.render_ctx.as_ref().unwrap();
+		assert_eq!(render_ctx.vertex_buffers.verts.len(), 7);
+		assert_eq!(render_ctx.vertex_buffers.indices.len(), 9);
+		assert!(puppet.node_comps.get::<TexturedMeshRenderCtx>(enabled).is_some());
+		assert!(puppet.node_comps.get::<TexturedMeshRenderCtx>(disabled).is_none());
+	}
+}
+
 /// Same as the reference Inochi2D implementation, Inox2D also aims for a "bring your own rendering backend" design.
 /// A custom backend shall implement this trait.
 ///

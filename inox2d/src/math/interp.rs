@@ -227,4 +227,24 @@ mod tests {
 			3.0
 		);
 	}
+
+	#[test]
+	fn test_bilinear_degenerate_input_range() {
+		let mut out = vec![Vec2::ZERO; 2];
+		let top_beg = vec![Vec2::new(1.0, 2.0), Vec2::new(3.0, 4.0)];
+		let top_end = vec![Vec2::new(5.0, 6.0), Vec2::new(7.0, 8.0)];
+		let bottom_beg = vec![Vec2::new(9.0, 10.0), Vec2::new(11.0, 12.0)];
+		let bottom_end = vec![Vec2::new(13.0, 14.0), Vec2::new(15.0, 16.0)];
+
+		bi_interpolate_vec2s_additive(
+			Vec2::ZERO,
+			InterpRange::new(Vec2::ZERO, Vec2::ZERO),
+			InterpRange::new(top_beg.as_slice(), top_end.as_slice()),
+			InterpRange::new(bottom_beg.as_slice(), bottom_end.as_slice()),
+			InterpolateMode::Linear,
+			&mut out,
+		);
+
+		assert_eq!(out, top_beg);
+	}
 }
