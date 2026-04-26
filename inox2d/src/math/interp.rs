@@ -50,6 +50,10 @@ fn interpolate_nearest(t: f32, range_in: InterpRange<f32>, range_out: InterpRang
 		range_in.end
 	);
 
+	if range_in.beg == range_in.end {
+		return range_out.beg;
+	}
+
 	if (range_in.end - t) < (t - range_in.beg) {
 		range_out.end
 	} else {
@@ -66,6 +70,10 @@ fn interpolate_linear(t: f32, range_in: InterpRange<f32>, range_out: InterpRange
 		range_in.beg,
 		range_in.end,
 	);
+
+	if range_in.beg == range_in.end {
+		return range_out.beg;
+	}
 
 	(t - range_in.beg) * (range_out.end - range_out.beg) / (range_in.end - range_in.beg) + range_out.beg
 }
@@ -205,6 +213,18 @@ mod tests {
 		assert_eq!(
 			interpolate_linear(0.0, InterpRange::new(-0.5, 0.0), InterpRange::new(-5.0, 5.0)),
 			5.0
+		);
+	}
+
+	#[test]
+	fn test_degenerate_input_range() {
+		assert_eq!(
+			interpolate_linear(0.0, InterpRange::new(0.0, 0.0), InterpRange::new(3.0, 7.0)),
+			3.0
+		);
+		assert_eq!(
+			interpolate_nearest(0.0, InterpRange::new(0.0, 0.0), InterpRange::new(3.0, 7.0)),
+			3.0
 		);
 	}
 }

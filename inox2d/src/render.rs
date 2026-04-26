@@ -61,6 +61,10 @@ impl RenderCtx {
 
 		let mut root_drawables_count: usize = 0;
 		for node in nodes.iter() {
+			if !node.enabled {
+				continue;
+			}
+
 			let drawable_kind = DrawableKind::new(node.uuid, comps, true);
 			if let Some(drawable_kind) = drawable_kind {
 				root_drawables_count += 1;
@@ -90,7 +94,7 @@ impl RenderCtx {
 						let children_list: Vec<InoxNodeUuid> = nodes
 							.get_children(node.uuid)
 							.filter_map(|n| {
-								if DrawableKind::new(n.uuid, comps, false).is_some() {
+								if n.enabled && DrawableKind::new(n.uuid, comps, false).is_some() {
 									Some(n.uuid)
 								} else {
 									None
@@ -138,6 +142,10 @@ impl RenderCtx {
 
 		// root is definitely not a drawable.
 		for node in nodes.iter().skip(1) {
+			if !node.enabled {
+				continue;
+			}
+
 			if let Some(drawable_kind) = DrawableKind::new(node.uuid, comps, false) {
 				let parent = nodes.get_parent(node.uuid);
 				let node_zsort = comps.get::<ZSort>(node.uuid).unwrap().0;
@@ -337,7 +345,7 @@ impl<T: InoxRenderer> InoxRendererExt for T {
 	///
 	/// This does not guarantee the display of a puppet on screen due to these possible reasons:
 	/// - Only provided `InoxRenderer` method implementations are called.
-	/// 
+	///
 	/// For example, maybe the caller still need to transfer content from a texture buffer to the screen surface buffer.
 	/// - The provided `InoxRender` implementation is wrong.
 	/// - `puppet` here does not belong to the `model` this `renderer` is initialized with. This will likely result in panics for non-existent node uuids.
