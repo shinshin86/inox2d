@@ -256,9 +256,6 @@ impl Puppet {
 			.as_mut()
 			.expect("Post-physics transform offsets depend on initialized transforms.")
 			.update(&self.nodes, &mut self.node_comps);
-		if let Some(render_ctx) = self.render_ctx.as_mut() {
-			render_ctx.update(&self.nodes, &mut self.node_comps);
-		}
 
 		Ok(nodes)
 	}
