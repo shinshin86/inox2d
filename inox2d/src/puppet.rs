@@ -213,15 +213,17 @@ impl Puppet {
 			.as_mut()
 			.expect("Post-physics param overrides depend on initialized transforms.")
 			.reset(&self.nodes, &mut self.node_comps);
-		self
-			.param_ctx
+		self.param_ctx
 			.as_ref()
 			.expect("Post-physics param overrides depend on initialized params.")
 			.apply(&self.params, &self.nodes, &mut self.node_comps);
-		self
-			.transform_ctx
+		self.transform_ctx
 			.as_mut()
 			.expect("Post-physics param overrides depend on initialized transforms.")
+			.update(&self.nodes, &mut self.node_comps);
+		self.render_ctx
+			.as_mut()
+			.expect("Post-physics param overrides depend on initialized rendering.")
 			.update(&self.nodes, &mut self.node_comps);
 		Ok(())
 	}
@@ -250,11 +252,13 @@ impl Puppet {
 			transform.relative.pixel_snap |= offset.pixel_snap;
 		}
 
-		self
-			.transform_ctx
+		self.transform_ctx
 			.as_mut()
 			.expect("Post-physics transform offsets depend on initialized transforms.")
 			.update(&self.nodes, &mut self.node_comps);
+		if let Some(render_ctx) = self.render_ctx.as_mut() {
+			render_ctx.update(&self.nodes, &mut self.node_comps);
+		}
 
 		Ok(nodes)
 	}
