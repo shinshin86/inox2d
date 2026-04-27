@@ -36,6 +36,124 @@ pub struct Puppet {
 	pub param_ctx: Option<ParamCtx>,
 }
 
+#[allow(dead_code)]
+pub(crate) mod frame_api {
+	use glam::{Mat4, Vec2};
+
+	use crate::math::transform::TransformOffset;
+	use crate::node::InoxNodeUuid;
+	use crate::params::ParamUuid;
+
+	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+	pub(crate) enum FrameOverrideMode {
+		Replace,
+		Add,
+		Clamp,
+	}
+
+	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+	pub(crate) enum FrameSkipPhase {
+		InitRender,
+		UpdateRender,
+		CommitPose,
+	}
+
+	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+	pub(crate) enum FrameSkipReason {
+		Disabled,
+		NonRenderable,
+		MissingMesh,
+		MissingDeformStack,
+		CompositeChildExcludedFromRootDrawList,
+	}
+
+	#[derive(Debug, Clone, PartialEq, Eq)]
+	pub(crate) struct FrameParamHandle {
+		pub(crate) uuid: ParamUuid,
+		pub(crate) name: String,
+	}
+
+	#[derive(Clone, Copy, PartialEq, Eq)]
+	pub(crate) struct FrameNodeHandle {
+		pub(crate) uuid: InoxNodeUuid,
+	}
+
+	impl std::fmt::Debug for FrameNodeHandle {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			f.debug_tuple("FrameNodeHandle").field(&self.uuid.0).finish()
+		}
+	}
+
+	#[derive(Debug, Clone)]
+	pub(crate) struct FrameParamOverride {
+		pub(crate) param: FrameParamHandle,
+		pub(crate) value: Vec2,
+		pub(crate) mode: FrameOverrideMode,
+	}
+
+	#[derive(Debug, Default, Clone)]
+	pub(crate) struct FramePose {
+		pub(crate) base_params: Vec<(FrameParamHandle, Vec2)>,
+		pub(crate) physics_input_offsets: Vec<(FrameNodeHandle, TransformOffset)>,
+		pub(crate) physics_outputs: Vec<(FrameParamHandle, Vec2)>,
+		pub(crate) post_physics_param_overrides: Vec<FrameParamOverride>,
+		pub(crate) post_physics_transform_offsets: Vec<(FrameNodeHandle, TransformOffset)>,
+	}
+
+	#[derive(Debug, Clone, PartialEq, Eq)]
+	pub(crate) struct FrameDiagnostic {
+		pub(crate) phase: FrameSkipPhase,
+		pub(crate) node: Option<FrameNodeHandle>,
+		pub(crate) message: String,
+	}
+
+	#[derive(Debug, Default, Clone)]
+	pub(crate) struct FrameContext {
+		pub(crate) frame_id: u64,
+		pub(crate) dt: f32,
+		pub(crate) physics_ran: bool,
+		pub(crate) pose: FramePose,
+		pub(crate) diagnostics: Vec<FrameDiagnostic>,
+	}
+
+	#[derive(Debug, Clone)]
+	pub(crate) struct FrameNodeSnapshot {
+		pub(crate) node: FrameNodeHandle,
+		pub(crate) name: String,
+		pub(crate) enabled: bool,
+		pub(crate) parent: Option<FrameNodeHandle>,
+		pub(crate) relative_transform: TransformOffset,
+		pub(crate) absolute_transform: Mat4,
+		pub(crate) zsort: f32,
+		pub(crate) post_physics_offset_applied: bool,
+	}
+
+	#[derive(Debug, Clone, PartialEq, Eq)]
+	pub(crate) struct FrameDrawableSnapshot {
+		pub(crate) node: FrameNodeHandle,
+		pub(crate) vertex_range: std::ops::Range<usize>,
+		pub(crate) index_range: std::ops::Range<usize>,
+		pub(crate) deform_range: std::ops::Range<usize>,
+	}
+
+	#[derive(Debug, Clone, PartialEq, Eq)]
+	pub(crate) struct FrameSkippedNode {
+		pub(crate) node: FrameNodeHandle,
+		pub(crate) name: String,
+		pub(crate) phase: FrameSkipPhase,
+		pub(crate) reason: FrameSkipReason,
+	}
+
+	#[derive(Debug, Default, Clone)]
+	pub(crate) struct FrameSnapshot {
+		pub(crate) nodes: Vec<FrameNodeSnapshot>,
+		pub(crate) root_drawables_zsorted: Vec<FrameNodeHandle>,
+		pub(crate) composite_children_zsorted: Vec<(FrameNodeHandle, Vec<FrameNodeHandle>)>,
+		pub(crate) drawables: Vec<FrameDrawableSnapshot>,
+		pub(crate) skipped_nodes: Vec<FrameSkippedNode>,
+	}
+}
+
 impl Puppet {
 	pub(crate) fn new(
 		meta: PuppetMeta,
@@ -470,5 +588,43 @@ mod tests {
 				.x,
 			8.0
 		);
+	}
+
+	#[test]
+	fn frame_pose_skeleton_keeps_phase_state_separate() {
+		use crate::params::ParamUuid;
+		use crate::puppet::frame_api::{
+			FrameContext, FrameNodeHandle, FrameOverrideMode, FrameParamHandle, FrameParamOverride, FramePose,
+		};
+
+		let param = FrameParamHandle {
+			uuid: ParamUuid(10),
+			name: "ParamMouthOpenY".to_owned(),
+		};
+		let node = FrameNodeHandle { uuid: InoxNodeUuid(2) };
+		let mut pose = FramePose::default();
+
+		pose.base_params.push((param.clone(), vec2(0.2, 0.0)));
+		pose.physics_outputs.push((param.clone(), vec2(0.4, 0.0)));
+		pose.post_physics_param_overrides.push(FrameParamOverride {
+			param,
+			value: vec2(0.8, 0.0),
+			mode: FrameOverrideMode::Replace,
+		});
+		pose.post_physics_transform_offsets
+			.push((node, TransformOffset::default()));
+
+		assert_eq!(pose.base_params.len(), 1);
+		assert_eq!(pose.physics_outputs.len(), 1);
+		assert_eq!(pose.post_physics_param_overrides.len(), 1);
+		assert_eq!(pose.post_physics_transform_offsets.len(), 1);
+
+		let context = FrameContext {
+			pose,
+			dt: 1.0 / 60.0,
+			..FrameContext::default()
+		};
+		assert_eq!(context.pose.base_params.len(), 1);
+		assert_eq!(context.dt, 1.0 / 60.0);
 	}
 }
