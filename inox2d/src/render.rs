@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::mem::swap;
 
 use crate::node::{
-	components::{DeformStack, Mask, Masks, ZSort},
+	components::{DeformStack, Drawable, DrawableBaseOpacity, Mask, Masks, ZSort},
 	drawables::{CompositeComponents, DrawableKind, TexturedMeshComponents},
 	InoxNodeUuid,
 };
@@ -63,6 +63,13 @@ impl RenderCtx {
 		for node in nodes.iter() {
 			if !node.enabled {
 				continue;
+			}
+
+			if let Some(base_opacity) = comps
+				.get::<Drawable>(node.uuid)
+				.map(|drawable| drawable.blending.opacity)
+			{
+				comps.add(node.uuid, DrawableBaseOpacity(base_opacity));
 			}
 
 			let drawable_kind = DrawableKind::new(node.uuid, comps, true);
@@ -130,6 +137,10 @@ impl RenderCtx {
 	/// Reset all `DeformStack`.
 	pub(crate) fn reset(&mut self, nodes: &InoxNodeTree, comps: &mut World) {
 		for node in nodes.iter() {
+			if let Some(base_opacity) = comps.get::<DrawableBaseOpacity>(node.uuid).map(|base| base.0) {
+				comps.get_mut::<Drawable>(node.uuid).unwrap().blending.opacity = base_opacity;
+			}
+
 			if let Some(deform_stack) = comps.get_mut::<DeformStack>(node.uuid) {
 				deform_stack.reset();
 			}

@@ -8,7 +8,7 @@ use crate::math::{
 	matrix::Matrix2d,
 };
 use crate::node::{
-	components::{DeformSource, DeformStack, Mesh, TransformStore, ZSort},
+	components::{DeformSource, DeformStack, Drawable, Mesh, TransformStore, ZSort},
 	InoxNodeUuid,
 };
 use crate::puppet::{InoxNodeTree, Puppet, World};
@@ -32,8 +32,7 @@ pub enum BindingValues {
 	TransformRY(Matrix2d<f32>),
 	TransformRZ(Matrix2d<f32>),
 	Deform(Matrix2d<Vec<Vec2>>),
-	// TODO
-	Opacity,
+	Opacity(Matrix2d<f32>),
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +51,14 @@ fn ranges_out(
 	let out_top = InterpRange::new(matrix[(x_mindex, y_mindex)], matrix[(x_maxdex, y_mindex)]);
 	let out_btm = InterpRange::new(matrix[(x_mindex, y_maxdex)], matrix[(x_maxdex, y_maxdex)]);
 	(out_top, out_btm)
+}
+
+fn clamp_opacity(opacity: f32) -> f32 {
+	if opacity.is_finite() {
+		opacity.clamp(0.0, 1.0)
+	} else {
+		0.0
+	}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -228,8 +235,24 @@ impl Param {
 						.expect("Nodes being deformed must have a DeformStack component.")
 						.push(DeformSource::Param(self.uuid), Deform::Direct(direct_deform));
 				}
-				// TODO
-				BindingValues::Opacity => {}
+				BindingValues::Opacity(ref matrix) => {
+					let (out_top, out_bottom) = ranges_out(matrix, x_mindex, x_maxdex, y_mindex, y_maxdex);
+					let opacity_offset =
+						bi_interpolate_f32(val_normed, range_in, out_top, out_bottom, binding.interpolate_mode);
+
+					let Some(drawable) = comps.get_mut::<Drawable>(binding.node) else {
+						let target_name = nodes.get_node(binding.node).map(|n| n.name.as_str());
+						tracing::warn!(
+							"Opacity param target must have a Drawable component. (Param: {}, Binding Node: {} ({:?}))",
+							self.name,
+							target_name.unwrap_or("<NO NAME>"),
+							binding.node.0
+						);
+						continue;
+					};
+
+					drawable.blending.opacity = clamp_opacity(drawable.blending.opacity + opacity_offset);
+				}
 			}
 		}
 	}

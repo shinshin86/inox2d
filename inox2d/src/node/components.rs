@@ -34,6 +34,8 @@ pub struct Drawable {
 	pub masks: Option<Masks>,
 }
 
+pub(crate) struct DrawableBaseOpacity(pub f32);
+
 pub struct Blending {
 	pub mode: BlendMode,
 	pub tint: Vec3,

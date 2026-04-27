@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use glam::{Vec2, Vec3};
 
 use crate::math::transform::TransformOffset;
-use crate::node::components::TransformStore;
+use crate::node::components::{Drawable, TransformStore};
 use crate::node::{InoxNode, InoxNodeUuid};
 use crate::params::{Param, ParamCtx, SetParamError};
 use crate::physics::{PhysicsCtx, PuppetPhysics};
@@ -378,6 +378,56 @@ impl Puppet {
 		Ok(nodes)
 	}
 
+	/// Override drawable opacity for every node whose name matches any candidate.
+	///
+	/// This is intended for runtime motion effects such as Live2D `PartOpacity`.
+	/// Call it after frame evaluation and before rendering so the value wins for the
+	/// final pose without mutating the authored model.
+	pub fn set_drawable_opacity_by_names(
+		&mut self,
+		node_names: &[&str],
+		opacity: f32,
+	) -> Result<Vec<InoxNodeUuid>, SetDrawableOpacityError> {
+		let nodes = self.nodes.find_nodes_by_names(node_names);
+		if nodes.is_empty() {
+			return Err(SetDrawableOpacityError::NoNodesNamed(
+				node_names.iter().map(|name| (*name).to_owned()).collect(),
+			));
+		}
+
+		let opacity = if opacity.is_finite() {
+			opacity.clamp(0.0, 1.0)
+		} else {
+			1.0
+		};
+		let mut drawable_nodes = Vec::new();
+		for node in &nodes {
+			let Some(drawable) = self.node_comps.get_mut::<Drawable>(*node) else {
+				continue;
+			};
+
+			drawable.blending.opacity = opacity;
+			drawable_nodes.push(*node);
+		}
+
+		if drawable_nodes.is_empty() {
+			return Err(SetDrawableOpacityError::NoDrawableNodesNamed(
+				node_names.iter().map(|name| (*name).to_owned()).collect(),
+			));
+		}
+
+		Ok(drawable_nodes)
+	}
+
+	/// Alias for [`Puppet::set_drawable_opacity_by_names`] that matches the post-physics override API naming.
+	pub fn apply_post_physics_drawable_opacity_by_names(
+		&mut self,
+		node_names: &[&str],
+		opacity: f32,
+	) -> Result<Vec<InoxNodeUuid>, SetDrawableOpacityError> {
+		self.set_drawable_opacity_by_names(node_names, opacity)
+	}
+
 	fn apply_physics_input_offsets(&mut self) {
 		for (node, offset) in &self.physics_input_offsets {
 			let Some(transform) = self.node_comps.get_mut::<TransformStore>(*node) else {
@@ -473,6 +523,15 @@ pub enum SetPhysicsInputOffsetError {
 	NoNodeWithUuid(u32),
 }
 
+/// Possible errors applying drawable opacity overrides.
+#[derive(Debug, thiserror::Error)]
+pub enum SetDrawableOpacityError {
+	#[error("No nodes named any of {0:?}")]
+	NoNodesNamed(Vec<String>),
+	#[error("No drawable nodes named any of {0:?}")]
+	NoDrawableNodesNamed(Vec<String>),
+}
+
 #[cfg(test)]
 mod tests {
 	use std::collections::HashMap;
@@ -482,6 +541,7 @@ mod tests {
 	use super::*;
 	use crate::math::interp::InterpolateMode;
 	use crate::math::matrix::Matrix2d;
+	use crate::node::components::{BlendMode, Blending, Drawable};
 	use crate::node::{InoxNode, InoxNodeUuid};
 	use crate::params::{AxisPoints, Binding, BindingValues, Param, ParamUuid};
 	use crate::physics::PuppetPhysics;
@@ -532,6 +592,39 @@ mod tests {
 				interpolate_mode: InterpolateMode::Linear,
 				values: BindingValues::TransformTX(Matrix2d::from_slice_vecs(&[vec![0.0, 10.0]], false).unwrap()),
 			}],
+		}
+	}
+
+	fn opacity_param(target: InoxNodeUuid) -> Param {
+		Param {
+			uuid: ParamUuid(11),
+			name: "ParamOpacity".to_owned(),
+			is_vec2: false,
+			min: Vec2::ZERO,
+			max: Vec2::ONE,
+			defaults: Vec2::ZERO,
+			axis_points: AxisPoints {
+				x: vec![0.0, 1.0],
+				y: vec![0.0],
+			},
+			bindings: vec![Binding {
+				node: target,
+				is_set: Matrix2d::default_filled(2, 1, false),
+				interpolate_mode: InterpolateMode::Linear,
+				values: BindingValues::Opacity(Matrix2d::from_slice_vecs(&[vec![0.0, 0.75]], false).unwrap()),
+			}],
+		}
+	}
+
+	fn drawable(opacity: f32) -> Drawable {
+		Drawable {
+			blending: Blending {
+				mode: BlendMode::Normal,
+				tint: Vec3::ONE,
+				screen_tint: Vec3::ZERO,
+				opacity,
+			},
+			masks: None,
 		}
 	}
 
@@ -588,6 +681,63 @@ mod tests {
 				.x,
 			8.0
 		);
+	}
+
+	#[test]
+	fn opacity_param_applies_delta_from_base_and_resets_each_frame() {
+		let root = InoxNodeUuid(1);
+		let part = InoxNodeUuid(2);
+		let mut params = HashMap::new();
+		params.insert("ParamOpacity".to_owned(), opacity_param(part));
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			params,
+		);
+		puppet.nodes.add(root, part, node(part.0, "Mouth"));
+		puppet.node_comps.add(part, drawable(0.5));
+		puppet.init_transforms();
+		puppet.init_rendering();
+		puppet.init_params();
+
+		puppet.begin_frame();
+		puppet.param_ctx.as_mut().unwrap().set("ParamOpacity", Vec2::X).unwrap();
+		puppet.end_frame(0.0);
+		assert_eq!(puppet.node_comps.get::<Drawable>(part).unwrap().blending.opacity, 1.0);
+
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+		assert_eq!(puppet.node_comps.get::<Drawable>(part).unwrap().blending.opacity, 0.5);
+	}
+
+	#[test]
+	fn set_drawable_opacity_by_names_clamps_and_does_not_change_base_opacity() {
+		let root = InoxNodeUuid(1);
+		let part = InoxNodeUuid(2);
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			HashMap::new(),
+		);
+		puppet.nodes.add(root, part, node(part.0, "Mouth"));
+		puppet.node_comps.add(part, drawable(0.5));
+		puppet.init_transforms();
+		puppet.init_rendering();
+
+		assert!(puppet.set_drawable_opacity_by_names(&["Mouth"], 2.0).unwrap() == vec![part]);
+		assert_eq!(puppet.node_comps.get::<Drawable>(part).unwrap().blending.opacity, 1.0);
+
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+		assert_eq!(puppet.node_comps.get::<Drawable>(part).unwrap().blending.opacity, 0.5);
 	}
 
 	#[test]
