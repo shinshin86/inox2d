@@ -19,6 +19,22 @@ use transforms::TransformCtx;
 pub use tree::InoxNodeTree;
 pub use world::World;
 
+/// Opaque resolved node target for per-frame runtime effects.
+///
+/// Host integrations can resolve node names once when a model is loaded, then
+/// reuse this handle for physics input, post-physics visible offsets, and
+/// drawable opacity effects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResolvedNodeHandle {
+	uuid: InoxNodeUuid,
+}
+
+impl ResolvedNodeHandle {
+	pub fn raw_uuid(self) -> u32 {
+		self.uuid.0
+	}
+}
+
 /// Inochi2D puppet.
 pub struct Puppet {
 	pub meta: PuppetMeta,
@@ -251,6 +267,36 @@ impl Puppet {
 		Ok(())
 	}
 
+	pub fn resolve_node_by_name(&self, node_name: &str) -> Result<ResolvedNodeHandle, SetPhysicsInputOffsetError> {
+		let Some(node) = self.nodes.find_node_by_name(node_name) else {
+			return Err(SetPhysicsInputOffsetError::NoNodeNamed(node_name.to_owned()));
+		};
+
+		Ok(ResolvedNodeHandle { uuid: node })
+	}
+
+	pub fn resolve_nodes_by_names(
+		&self,
+		node_names: &[&str],
+	) -> Result<Vec<ResolvedNodeHandle>, SetPhysicsInputOffsetError> {
+		let nodes = self.nodes.find_nodes_by_names(node_names);
+		if nodes.is_empty() {
+			return Err(SetPhysicsInputOffsetError::NoNodesNamed(
+				node_names.iter().map(|name| (*name).to_owned()).collect(),
+			));
+		}
+
+		Ok(nodes.into_iter().map(|uuid| ResolvedNodeHandle { uuid }).collect())
+	}
+
+	pub fn set_physics_input_offset_by_handle(
+		&mut self,
+		node: ResolvedNodeHandle,
+		offset: TransformOffset,
+	) -> Result<(), SetPhysicsInputOffsetError> {
+		self.set_physics_input_offset(node.uuid, offset)
+	}
+
 	/// Convenience wrapper around [`Puppet::set_physics_input_offset`] using a node name lookup.
 	pub fn set_physics_input_offset_by_name(
 		&mut self,
@@ -378,6 +424,36 @@ impl Puppet {
 		Ok(nodes)
 	}
 
+	pub fn apply_post_physics_transform_offsets_by_handles(
+		&mut self,
+		nodes: &[ResolvedNodeHandle],
+		offset: &TransformOffset,
+	) -> Result<Vec<ResolvedNodeHandle>, SetPhysicsInputOffsetError> {
+		let mut applied = Vec::new();
+		for node in nodes {
+			if self.nodes.get_node(node.uuid).is_none() {
+				return Err(SetPhysicsInputOffsetError::NoNodeWithUuid(node.raw_uuid()));
+			}
+
+			let Some(transform) = self.node_comps.get_mut::<TransformStore>(node.uuid) else {
+				continue;
+			};
+
+			transform.relative.translation += offset.translation;
+			transform.relative.rotation += offset.rotation;
+			transform.relative.scale *= offset.scale;
+			transform.relative.pixel_snap |= offset.pixel_snap;
+			applied.push(*node);
+		}
+
+		self.transform_ctx
+			.as_mut()
+			.expect("Post-physics transform offsets depend on initialized transforms.")
+			.update(&self.nodes, &mut self.node_comps);
+
+		Ok(applied)
+	}
+
 	/// Override drawable opacity for every node whose name matches any candidate.
 	///
 	/// This is intended for runtime motion effects such as Live2D `PartOpacity`.
@@ -414,6 +490,37 @@ impl Puppet {
 			return Err(SetDrawableOpacityError::NoDrawableNodesNamed(
 				node_names.iter().map(|name| (*name).to_owned()).collect(),
 			));
+		}
+
+		Ok(drawable_nodes)
+	}
+
+	pub fn set_drawable_opacity_by_handles(
+		&mut self,
+		nodes: &[ResolvedNodeHandle],
+		opacity: f32,
+	) -> Result<Vec<ResolvedNodeHandle>, SetDrawableOpacityError> {
+		let opacity = if opacity.is_finite() {
+			opacity.clamp(0.0, 1.0)
+		} else {
+			1.0
+		};
+		let mut drawable_nodes = Vec::new();
+		for node in nodes {
+			if self.nodes.get_node(node.uuid).is_none() {
+				return Err(SetDrawableOpacityError::NoNodeWithUuid(node.raw_uuid()));
+			}
+
+			let Some(drawable) = self.node_comps.get_mut::<Drawable>(node.uuid) else {
+				continue;
+			};
+
+			drawable.blending.opacity = opacity;
+			drawable_nodes.push(*node);
+		}
+
+		if drawable_nodes.is_empty() {
+			return Err(SetDrawableOpacityError::NoDrawableNodes);
 		}
 
 		Ok(drawable_nodes)
@@ -530,6 +637,10 @@ pub enum SetDrawableOpacityError {
 	NoNodesNamed(Vec<String>),
 	#[error("No drawable nodes named any of {0:?}")]
 	NoDrawableNodesNamed(Vec<String>),
+	#[error("No node with uuid {0}")]
+	NoNodeWithUuid(u32),
+	#[error("No drawable nodes in resolved handle list")]
+	NoDrawableNodes,
 }
 
 #[cfg(test)]
@@ -738,6 +849,72 @@ mod tests {
 		puppet.begin_frame();
 		puppet.end_frame(0.0);
 		assert_eq!(puppet.node_comps.get::<Drawable>(part).unwrap().blending.opacity, 0.5);
+	}
+
+	#[test]
+	fn resolved_node_handles_apply_drawable_opacity_without_name_lookup() {
+		let root = InoxNodeUuid(1);
+		let part = InoxNodeUuid(2);
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			HashMap::new(),
+		);
+		puppet.nodes.add(root, part, node(part.0, "Arm:: Left"));
+		puppet.node_comps.add(part, drawable(0.5));
+		puppet.init_transforms();
+		puppet.init_rendering();
+
+		let handle = puppet.resolve_node_by_name("Arm:: Left").unwrap();
+		assert_eq!(handle.raw_uuid(), part.0);
+
+		let applied = puppet.set_drawable_opacity_by_handles(&[handle], 0.25).unwrap();
+		assert_eq!(applied, vec![handle]);
+		assert_eq!(puppet.node_comps.get::<Drawable>(part).unwrap().blending.opacity, 0.25);
+
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+		assert_eq!(puppet.node_comps.get::<Drawable>(part).unwrap().blending.opacity, 0.5);
+	}
+
+	#[test]
+	fn resolved_node_handles_apply_visible_offsets_without_name_lookup() {
+		let root = InoxNodeUuid(1);
+		let part = InoxNodeUuid(2);
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			HashMap::new(),
+		);
+		puppet.nodes.add(root, part, node(part.0, "Hand:: Left"));
+		puppet.init_transforms();
+
+		let handle = puppet.resolve_node_by_name("Hand:: Left").unwrap();
+		let mut offset = TransformOffset::default();
+		offset.translation.x = 4.0;
+		let applied = puppet
+			.apply_post_physics_transform_offsets_by_handles(&[handle], &offset)
+			.unwrap();
+
+		assert_eq!(applied, vec![handle]);
+		assert_eq!(
+			puppet
+				.node_comps
+				.get::<TransformStore>(part)
+				.unwrap()
+				.relative
+				.translation
+				.x,
+			4.0
+		);
 	}
 
 	#[test]

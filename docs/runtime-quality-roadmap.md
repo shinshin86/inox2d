@@ -85,3 +85,20 @@ A Live2D-like host app needs a renderer-independent snapshot after commit. The m
 - skipped nodes: UUID, name, phase (`InitRender`, `UpdateRender`, `CommitPose`), and reason such as disabled, non-renderable, missing mesh, missing deform stack, or composite child excluded from root draw list.
 
 These fields let tests and host debug panels assert final pose/render state without requiring an OpenGL/WebGL backend.
+
+## 2026-04-28 resolved node handles
+
+Added a small public node-handle API as the first step toward typed runtime
+effects:
+
+- `Puppet::resolve_node_by_name()`
+- `Puppet::resolve_nodes_by_names()`
+- `Puppet::set_physics_input_offset_by_handle()`
+- `Puppet::apply_post_physics_transform_offsets_by_handles()`
+- `Puppet::set_drawable_opacity_by_handles()`
+
+This keeps the existing name-based helpers for compatibility, while allowing
+host integrations to resolve motion targets once after model load and reuse
+opaque handles during frame playback. The immediate use cases are Live2D-like
+`PartOpacity`, post-physics visible offsets, and future gesture/secondary-motion
+effects without repeated name lookup in the hot path.
