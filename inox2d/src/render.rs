@@ -222,6 +222,10 @@ impl RenderCtx {
 			.zip(root_drawable_uuid_zsort_vec.iter())
 			.for_each(|(old, new)| *old = new.0);
 	}
+
+	pub(crate) fn root_drawables_zsorted(&self) -> &[InoxNodeUuid] {
+		&self.root_drawables_zsorted
+	}
 }
 
 #[cfg(test)]

@@ -3,16 +3,16 @@ mod transforms;
 mod tree;
 mod world;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use glam::{Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 
 use crate::math::transform::TransformOffset;
-use crate::node::components::{Drawable, TransformStore};
+use crate::node::components::{Drawable, TransformStore, ZSort};
 use crate::node::{InoxNode, InoxNodeUuid};
 use crate::params::{Param, ParamCtx, ParamUuid, SetParamError};
 use crate::physics::{PhysicsCtx, PuppetPhysics};
-use crate::render::RenderCtx;
+use crate::render::{CompositeRenderCtx, RenderCtx, TexturedMeshRenderCtx};
 
 use meta::PuppetMeta;
 use transforms::TransformCtx;
@@ -71,10 +71,11 @@ pub struct Puppet {
 	pub(crate) params: HashMap<String, Param>,
 	/// Context for animating puppet with parameters. See `.init_params()`
 	pub param_ctx: Option<ParamCtx>,
+	frame_context: frame_api::FrameContext,
+	post_physics_offset_nodes: HashSet<InoxNodeUuid>,
 }
 
-#[allow(dead_code)]
-pub(crate) mod frame_api {
+pub mod frame_api {
 	use glam::{Mat4, Vec2};
 
 	use crate::math::transform::TransformOffset;
@@ -82,21 +83,21 @@ pub(crate) mod frame_api {
 	use crate::params::ParamUuid;
 
 	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-	pub(crate) enum FrameOverrideMode {
+	pub enum FrameOverrideMode {
 		Replace,
 		Add,
 		Clamp,
 	}
 
 	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-	pub(crate) enum FrameSkipPhase {
+	pub enum FrameSkipPhase {
 		InitRender,
 		UpdateRender,
 		CommitPose,
 	}
 
 	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-	pub(crate) enum FrameSkipReason {
+	pub enum FrameSkipReason {
 		Disabled,
 		NonRenderable,
 		MissingMesh,
@@ -105,14 +106,14 @@ pub(crate) mod frame_api {
 	}
 
 	#[derive(Debug, Clone, PartialEq, Eq)]
-	pub(crate) struct FrameParamHandle {
-		pub(crate) uuid: ParamUuid,
-		pub(crate) name: String,
+	pub struct FrameParamHandle {
+		pub uuid: ParamUuid,
+		pub name: String,
 	}
 
 	#[derive(Clone, Copy, PartialEq, Eq)]
-	pub(crate) struct FrameNodeHandle {
-		pub(crate) uuid: InoxNodeUuid,
+	pub struct FrameNodeHandle {
+		pub uuid: InoxNodeUuid,
 	}
 
 	impl std::fmt::Debug for FrameNodeHandle {
@@ -122,72 +123,87 @@ pub(crate) mod frame_api {
 	}
 
 	#[derive(Debug, Clone)]
-	pub(crate) struct FrameParamOverride {
-		pub(crate) param: FrameParamHandle,
-		pub(crate) value: Vec2,
-		pub(crate) mode: FrameOverrideMode,
+	pub struct FrameParamOverride {
+		pub param: FrameParamHandle,
+		pub value: Vec2,
+		pub mode: FrameOverrideMode,
 	}
 
 	#[derive(Debug, Default, Clone)]
-	pub(crate) struct FramePose {
-		pub(crate) base_params: Vec<(FrameParamHandle, Vec2)>,
-		pub(crate) physics_input_offsets: Vec<(FrameNodeHandle, TransformOffset)>,
-		pub(crate) physics_outputs: Vec<(FrameParamHandle, Vec2)>,
-		pub(crate) post_physics_param_overrides: Vec<FrameParamOverride>,
-		pub(crate) post_physics_transform_offsets: Vec<(FrameNodeHandle, TransformOffset)>,
+	pub struct FramePose {
+		pub base_params: Vec<(FrameParamHandle, Vec2)>,
+		pub physics_input_offsets: Vec<(FrameNodeHandle, TransformOffset)>,
+		pub physics_outputs: Vec<(FrameParamHandle, Vec2)>,
+		pub post_physics_param_overrides: Vec<FrameParamOverride>,
+		pub post_physics_transform_offsets: Vec<(FrameNodeHandle, TransformOffset)>,
 	}
 
 	#[derive(Debug, Clone, PartialEq, Eq)]
-	pub(crate) struct FrameDiagnostic {
-		pub(crate) phase: FrameSkipPhase,
-		pub(crate) node: Option<FrameNodeHandle>,
-		pub(crate) message: String,
+	pub struct FrameDiagnostic {
+		pub phase: FrameSkipPhase,
+		pub node: Option<FrameNodeHandle>,
+		pub message: String,
 	}
 
 	#[derive(Debug, Default, Clone)]
-	pub(crate) struct FrameContext {
-		pub(crate) frame_id: u64,
-		pub(crate) dt: f32,
-		pub(crate) physics_ran: bool,
-		pub(crate) pose: FramePose,
-		pub(crate) diagnostics: Vec<FrameDiagnostic>,
+	pub struct FrameContext {
+		pub frame_id: u64,
+		pub dt: f32,
+		pub physics_ran: bool,
+		pub pose: FramePose,
+		pub diagnostics: Vec<FrameDiagnostic>,
 	}
 
 	#[derive(Debug, Clone)]
-	pub(crate) struct FrameNodeSnapshot {
-		pub(crate) node: FrameNodeHandle,
-		pub(crate) name: String,
-		pub(crate) enabled: bool,
-		pub(crate) parent: Option<FrameNodeHandle>,
-		pub(crate) relative_transform: TransformOffset,
-		pub(crate) absolute_transform: Mat4,
-		pub(crate) zsort: f32,
-		pub(crate) post_physics_offset_applied: bool,
+	pub struct FrameNodeSnapshot {
+		pub node: FrameNodeHandle,
+		pub name: String,
+		pub enabled: bool,
+		pub parent: Option<FrameNodeHandle>,
+		pub relative_transform: TransformOffset,
+		pub absolute_transform: Mat4,
+		pub zsort: f32,
+		pub post_physics_offset_applied: bool,
 	}
 
 	#[derive(Debug, Clone, PartialEq, Eq)]
-	pub(crate) struct FrameDrawableSnapshot {
-		pub(crate) node: FrameNodeHandle,
-		pub(crate) vertex_range: std::ops::Range<usize>,
-		pub(crate) index_range: std::ops::Range<usize>,
-		pub(crate) deform_range: std::ops::Range<usize>,
+	pub struct FrameDrawableSnapshot {
+		pub node: FrameNodeHandle,
+		pub vertex_range: std::ops::Range<usize>,
+		pub index_range: std::ops::Range<usize>,
+		pub deform_range: std::ops::Range<usize>,
 	}
 
 	#[derive(Debug, Clone, PartialEq, Eq)]
-	pub(crate) struct FrameSkippedNode {
-		pub(crate) node: FrameNodeHandle,
-		pub(crate) name: String,
-		pub(crate) phase: FrameSkipPhase,
-		pub(crate) reason: FrameSkipReason,
+	pub struct FrameSkippedNode {
+		pub node: FrameNodeHandle,
+		pub name: String,
+		pub phase: FrameSkipPhase,
+		pub reason: FrameSkipReason,
 	}
 
 	#[derive(Debug, Default, Clone)]
-	pub(crate) struct FrameSnapshot {
-		pub(crate) nodes: Vec<FrameNodeSnapshot>,
-		pub(crate) root_drawables_zsorted: Vec<FrameNodeHandle>,
-		pub(crate) composite_children_zsorted: Vec<(FrameNodeHandle, Vec<FrameNodeHandle>)>,
-		pub(crate) drawables: Vec<FrameDrawableSnapshot>,
-		pub(crate) skipped_nodes: Vec<FrameSkippedNode>,
+	pub struct FrameSnapshot {
+		pub nodes: Vec<FrameNodeSnapshot>,
+		pub root_drawables_zsorted: Vec<FrameNodeHandle>,
+		pub composite_children_zsorted: Vec<(FrameNodeHandle, Vec<FrameNodeHandle>)>,
+		pub drawables: Vec<FrameDrawableSnapshot>,
+		pub skipped_nodes: Vec<FrameSkippedNode>,
+	}
+}
+
+impl From<ResolvedNodeHandle> for frame_api::FrameNodeHandle {
+	fn from(handle: ResolvedNodeHandle) -> Self {
+		Self { uuid: handle.uuid }
+	}
+}
+
+impl From<&ResolvedParamHandle> for frame_api::FrameParamHandle {
+	fn from(handle: &ResolvedParamHandle) -> Self {
+		Self {
+			uuid: handle.uuid,
+			name: handle.name.clone(),
+		}
 	}
 }
 
@@ -209,6 +225,8 @@ impl Puppet {
 			render_ctx: None,
 			params,
 			param_ctx: None,
+			frame_context: frame_api::FrameContext::default(),
+			post_physics_offset_nodes: HashSet::new(),
 		}
 	}
 
@@ -326,7 +344,12 @@ impl Puppet {
 		self.param_ctx
 			.as_mut()
 			.expect("Resolved parameter updates depend on initialized params.")
-			.set(param.name(), value)
+			.set(param.name(), value)?;
+		self.frame_context
+			.pose
+			.base_params
+			.push((frame_api::FrameParamHandle::from(param), value));
+		Ok(())
 	}
 
 	pub fn set_physics_input_offset_by_handle(
@@ -334,7 +357,12 @@ impl Puppet {
 		node: ResolvedNodeHandle,
 		offset: TransformOffset,
 	) -> Result<(), SetPhysicsInputOffsetError> {
-		self.set_physics_input_offset(node.uuid, offset)
+		self.set_physics_input_offset(node.uuid, offset.clone())?;
+		self.frame_context
+			.pose
+			.physics_input_offsets
+			.push((frame_api::FrameNodeHandle::from(node), offset));
+		Ok(())
 	}
 
 	/// Convenience wrapper around [`Puppet::set_physics_input_offset`] using a node name lookup.
@@ -347,7 +375,12 @@ impl Puppet {
 			return Err(SetPhysicsInputOffsetError::NoNodeNamed(node_name.to_owned()));
 		};
 
-		self.set_physics_input_offset(node, offset)
+		self.set_physics_input_offset(node, offset.clone())?;
+		self.frame_context
+			.pose
+			.physics_input_offsets
+			.push((frame_api::FrameNodeHandle { uuid: node }, offset));
+		Ok(())
 	}
 
 	/// Resolve the first available node from a list of candidate names and apply a physics-only transform offset.
@@ -362,7 +395,11 @@ impl Puppet {
 			));
 		};
 
-		self.set_physics_input_offset(node, offset)?;
+		self.set_physics_input_offset(node, offset.clone())?;
+		self.frame_context
+			.pose
+			.physics_input_offsets
+			.push((frame_api::FrameNodeHandle { uuid: node }, offset));
 		Ok(node)
 	}
 
@@ -381,6 +418,10 @@ impl Puppet {
 
 		for node in &nodes {
 			self.set_physics_input_offset(*node, offset.clone())?;
+			self.frame_context
+				.pose
+				.physics_input_offsets
+				.push((frame_api::FrameNodeHandle { uuid: *node }, offset.clone()));
 		}
 
 		Ok(nodes)
@@ -407,6 +448,15 @@ impl Puppet {
 				.as_mut()
 				.expect("Post-physics param overrides depend on initialized params.")
 				.set(param_name, *value)?;
+			let handle = self.resolve_param_by_name(param_name)?;
+			self.frame_context
+				.pose
+				.post_physics_param_overrides
+				.push(frame_api::FrameParamOverride {
+					param: frame_api::FrameParamHandle::from(&handle),
+					value: *value,
+					mode: frame_api::FrameOverrideMode::Replace,
+				});
 		}
 
 		self.rebuild_render_pose_from_params();
@@ -422,7 +472,19 @@ impl Puppet {
 		}
 
 		for (param, value) in overrides {
-			self.set_parameter_by_handle(param, *value)?;
+			self.validate_param_handle(param)?;
+			self.param_ctx
+				.as_mut()
+				.expect("Post-physics param overrides depend on initialized params.")
+				.set(param.name(), *value)?;
+			self.frame_context
+				.pose
+				.post_physics_param_overrides
+				.push(frame_api::FrameParamOverride {
+					param: frame_api::FrameParamHandle::from(param),
+					value: *value,
+					mode: frame_api::FrameOverrideMode::Replace,
+				});
 		}
 
 		self.rebuild_render_pose_from_params();
@@ -485,6 +547,11 @@ impl Puppet {
 			transform.relative.rotation += offset.rotation;
 			transform.relative.scale *= offset.scale;
 			transform.relative.pixel_snap |= offset.pixel_snap;
+			self.post_physics_offset_nodes.insert(*node);
+			self.frame_context
+				.pose
+				.post_physics_transform_offsets
+				.push((frame_api::FrameNodeHandle { uuid: *node }, (*offset).clone()));
 		}
 
 		self.transform_ctx
@@ -514,6 +581,11 @@ impl Puppet {
 			transform.relative.rotation += offset.rotation;
 			transform.relative.scale *= offset.scale;
 			transform.relative.pixel_snap |= offset.pixel_snap;
+			self.post_physics_offset_nodes.insert(node.uuid);
+			self.frame_context
+				.pose
+				.post_physics_transform_offsets
+				.push((frame_api::FrameNodeHandle::from(*node), (*offset).clone()));
 			applied.push(*node);
 		}
 
@@ -621,6 +693,13 @@ impl Puppet {
 
 	/// Prepare the puppet for a new frame. User may set params afterwards.
 	pub fn begin_frame(&mut self) {
+		let next_frame_id = self.frame_context.frame_id.wrapping_add(1);
+		self.frame_context = frame_api::FrameContext {
+			frame_id: next_frame_id,
+			..frame_api::FrameContext::default()
+		};
+		self.post_physics_offset_nodes.clear();
+
 		if let Some(render_ctx) = self.render_ctx.as_mut() {
 			render_ctx.reset(&self.nodes, &mut self.node_comps);
 		}
@@ -638,6 +717,7 @@ impl Puppet {
 	///
 	/// Provide elapsed time for physics, if initialized, to run. Provide `0` for the first call.
 	pub fn end_frame(&mut self, dt: f32) {
+		self.frame_context.dt = dt;
 		if let Some(param_ctx) = self.param_ctx.as_mut() {
 			param_ctx.apply(&self.params, &self.nodes, &mut self.node_comps);
 		}
@@ -651,6 +731,7 @@ impl Puppet {
 		}
 
 		if let Some(physics_ctx) = self.physics_ctx.as_mut() {
+			self.frame_context.physics_ran = true;
 			let values_to_apply = physics_ctx.step(&self.physics, &self.nodes, &mut self.node_comps, dt);
 
 			// TODO: Think about separating DeformStack reset and RenderCtx reset?
@@ -658,6 +739,18 @@ impl Puppet {
 				.as_mut()
 				.expect("If physics is initialized, so does params, so does rendering.")
 				.reset(&self.nodes, &mut self.node_comps);
+
+			for (param_name, value) in &values_to_apply {
+				if let Some(param) = self.params.get(param_name) {
+					self.frame_context.pose.physics_outputs.push((
+						frame_api::FrameParamHandle {
+							uuid: param.uuid,
+							name: param_name.to_owned(),
+						},
+						*value,
+					));
+				}
+			}
 
 			// TODO: Fewer repeated calculations of a same transform?
 			let transform_ctx = self
@@ -682,6 +775,101 @@ impl Puppet {
 
 		if let Some(render_ctx) = self.render_ctx.as_mut() {
 			render_ctx.update(&self.nodes, &mut self.node_comps);
+		}
+	}
+
+	pub fn frame_context(&self) -> &frame_api::FrameContext {
+		&self.frame_context
+	}
+
+	pub fn snapshot_frame(&self) -> frame_api::FrameSnapshot {
+		let nodes = self
+			.nodes
+			.pre_order_iter()
+			.map(|node| {
+				let parent = if node.uuid == self.nodes.root_node_id {
+					None
+				} else {
+					Some(frame_api::FrameNodeHandle {
+						uuid: self.nodes.get_parent(node.uuid).uuid,
+					})
+				};
+				let transform = self.node_comps.get::<TransformStore>(node.uuid);
+				let zsort = self
+					.node_comps
+					.get::<ZSort>(node.uuid)
+					.map(|zsort| zsort.0)
+					.unwrap_or(node.zsort);
+
+				frame_api::FrameNodeSnapshot {
+					node: frame_api::FrameNodeHandle { uuid: node.uuid },
+					name: node.name.clone(),
+					enabled: node.enabled,
+					parent,
+					relative_transform: transform.map(|store| store.relative.clone()).unwrap_or_default(),
+					absolute_transform: transform.map(|store| store.absolute).unwrap_or(Mat4::IDENTITY),
+					zsort,
+					post_physics_offset_applied: self.post_physics_offset_nodes.contains(&node.uuid),
+				}
+			})
+			.collect();
+
+		let root_drawables_zsorted = self
+			.render_ctx
+			.as_ref()
+			.map(|render_ctx| {
+				render_ctx
+					.root_drawables_zsorted()
+					.iter()
+					.map(|uuid| frame_api::FrameNodeHandle { uuid: *uuid })
+					.collect()
+			})
+			.unwrap_or_default();
+
+		let mut composite_children_zsorted = Vec::new();
+		let mut drawables = Vec::new();
+		let mut skipped_nodes = Vec::new();
+
+		for node in self.nodes.pre_order_iter() {
+			if !node.enabled {
+				skipped_nodes.push(frame_api::FrameSkippedNode {
+					node: frame_api::FrameNodeHandle { uuid: node.uuid },
+					name: node.name.clone(),
+					phase: frame_api::FrameSkipPhase::CommitPose,
+					reason: frame_api::FrameSkipReason::Disabled,
+				});
+				continue;
+			}
+
+			if let Some(composite) = self.node_comps.get::<CompositeRenderCtx>(node.uuid) {
+				composite_children_zsorted.push((
+					frame_api::FrameNodeHandle { uuid: node.uuid },
+					composite
+						.zsorted_children_list
+						.iter()
+						.map(|uuid| frame_api::FrameNodeHandle { uuid: *uuid })
+						.collect(),
+				));
+			}
+
+			if let Some(render_ctx) = self.node_comps.get::<TexturedMeshRenderCtx>(node.uuid) {
+				let vert_offset = render_ctx.vert_offset as usize;
+				let index_offset = render_ctx.index_offset as usize;
+				drawables.push(frame_api::FrameDrawableSnapshot {
+					node: frame_api::FrameNodeHandle { uuid: node.uuid },
+					vertex_range: vert_offset..(vert_offset + render_ctx.vert_len),
+					index_range: index_offset..(index_offset + render_ctx.index_len),
+					deform_range: vert_offset..(vert_offset + render_ctx.vert_len),
+				});
+			}
+		}
+
+		frame_api::FrameSnapshot {
+			nodes,
+			root_drawables_zsorted,
+			composite_children_zsorted,
+			drawables,
+			skipped_nodes,
 		}
 	}
 }
@@ -723,11 +911,12 @@ mod tests {
 	use super::*;
 	use crate::math::interp::InterpolateMode;
 	use crate::math::matrix::Matrix2d;
-	use crate::node::components::{BlendMode, Blending, Drawable};
+	use crate::node::components::{BlendMode, Blending, Drawable, Mesh, TexturedMesh};
 	use crate::node::{InoxNode, InoxNodeUuid};
 	use crate::params::{AxisPoints, Binding, BindingValues, Param, ParamUuid};
 	use crate::physics::PuppetPhysics;
 	use crate::puppet::meta::PuppetMeta;
+	use crate::texture::TextureId;
 
 	fn node(uuid: u32, name: &str) -> InoxNode {
 		InoxNode {
@@ -808,6 +997,27 @@ mod tests {
 			},
 			masks: None,
 		}
+	}
+
+	fn add_mesh_drawable(puppet: &mut Puppet, id: InoxNodeUuid, opacity: f32) {
+		puppet.node_comps.add(id, drawable(opacity));
+		puppet.node_comps.add(
+			id,
+			TexturedMesh {
+				tex_albedo: TextureId(0),
+				tex_emissive: TextureId(0),
+				tex_bumpmap: TextureId(0),
+			},
+		);
+		puppet.node_comps.add(
+			id,
+			Mesh {
+				vertices: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+				uvs: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+				indices: vec![0, 1, 2],
+				origin: Vec2::ZERO,
+			},
+		);
 	}
 
 	#[test]
@@ -1064,6 +1274,100 @@ mod tests {
 				.x,
 			4.0
 		);
+	}
+
+	#[test]
+	fn frame_context_records_runtime_phase_inputs() {
+		let root = InoxNodeUuid(1);
+		let mouth = InoxNodeUuid(2);
+		let hand = InoxNodeUuid(3);
+		let mut params = HashMap::new();
+		params.insert("ParamMouthOpenY".to_owned(), mouth_param(mouth));
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			params,
+		);
+		puppet.nodes.add(root, mouth, node(mouth.0, "Mouth"));
+		puppet.nodes.add(root, hand, node(hand.0, "Hand:: Left"));
+		puppet.init_transforms();
+		puppet.init_rendering();
+		puppet.init_params();
+
+		let param = puppet.resolve_param_by_name("ParamMouthOpenY").unwrap();
+		let hand_handle = puppet.resolve_node_by_name("Hand:: Left").unwrap();
+		let mut offset = TransformOffset::default();
+		offset.translation.x = 3.0;
+
+		puppet.begin_frame();
+		puppet.set_parameter_by_handle(&param, vec2(0.2, 0.0)).unwrap();
+		puppet
+			.set_physics_input_offset_by_handle(hand_handle, offset.clone())
+			.unwrap();
+		puppet.end_frame(0.016);
+		puppet
+			.apply_post_physics_param_overrides_by_handles(&[(param, vec2(0.4, 0.0))])
+			.unwrap();
+		puppet
+			.apply_post_physics_transform_offsets_by_handles(&[hand_handle], &offset)
+			.unwrap();
+
+		let context = puppet.frame_context();
+		assert_eq!(context.frame_id, 1);
+		assert_eq!(context.dt, 0.016);
+		assert_eq!(context.pose.base_params.len(), 1);
+		assert_eq!(context.pose.physics_input_offsets.len(), 1);
+		assert_eq!(context.pose.post_physics_param_overrides.len(), 1);
+		assert_eq!(context.pose.post_physics_transform_offsets.len(), 1);
+	}
+
+	#[test]
+	fn snapshot_frame_exposes_final_transforms_and_draw_order() {
+		let root = InoxNodeUuid(1);
+		let enabled = InoxNodeUuid(2);
+		let disabled = InoxNodeUuid(3);
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			HashMap::new(),
+		);
+		puppet.nodes.add(root, enabled, node(enabled.0, "EnabledPart"));
+		let mut disabled_node = node(disabled.0, "DisabledPart");
+		disabled_node.enabled = false;
+		puppet.nodes.add(root, disabled, disabled_node);
+		add_mesh_drawable(&mut puppet, enabled, 1.0);
+		add_mesh_drawable(&mut puppet, disabled, 1.0);
+		puppet.init_transforms();
+		puppet.init_rendering();
+
+		let handle = puppet.resolve_node_by_name("EnabledPart").unwrap();
+		let mut offset = TransformOffset::default();
+		offset.translation.x = 5.0;
+
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+		puppet
+			.apply_post_physics_transform_offsets_by_handles(&[handle], &offset)
+			.unwrap();
+
+		let snapshot = puppet.snapshot_frame();
+		assert_eq!(
+			snapshot.root_drawables_zsorted,
+			vec![frame_api::FrameNodeHandle { uuid: enabled }]
+		);
+		assert_eq!(snapshot.drawables.len(), 1);
+		assert_eq!(snapshot.skipped_nodes.len(), 1);
+		let enabled_snapshot = snapshot.nodes.iter().find(|node| node.node.uuid == enabled).unwrap();
+		assert!(enabled_snapshot.post_physics_offset_applied);
+		assert_eq!(enabled_snapshot.relative_transform.translation.x, 5.0);
 	}
 
 	#[test]

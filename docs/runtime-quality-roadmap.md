@@ -117,3 +117,20 @@ typed handles. Name-based parameter APIs remain as compatibility wrappers, but
 new Live2D-style retargeting code should prefer resolved handles so missing or
 renamed parameters fail at load/retarget setup time instead of being rediscovered
 inside every frame.
+
+## 2026-04-28 frame context and snapshot foundation
+
+Added the first runtime-owned frame inspection surface:
+
+- `Puppet::frame_context()` exposes the current frame id, `dt`, physics state,
+  and the pose inputs/effects recorded through resolved handle APIs.
+- `Puppet::snapshot_frame()` returns renderer-independent node transforms, draw
+  order handles, drawable buffer ranges, composite child order, and skipped
+  disabled nodes.
+- `RenderCtx::root_drawables_zsorted()` exposes draw order to the snapshot API
+  without requiring a renderer backend.
+
+This does not yet replace the existing `begin_frame()` / `end_frame()` flow, but
+it makes the current phase ordering observable and testable. The next step is to
+move runtime effect storage out of host-side sequencing and into an explicit
+pose transaction that commits the whole frame in one call.
