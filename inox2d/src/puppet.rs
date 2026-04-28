@@ -10,7 +10,7 @@ use glam::{Vec2, Vec3};
 use crate::math::transform::TransformOffset;
 use crate::node::components::{Drawable, TransformStore};
 use crate::node::{InoxNode, InoxNodeUuid};
-use crate::params::{Param, ParamCtx, SetParamError};
+use crate::params::{Param, ParamCtx, ParamUuid, SetParamError};
 use crate::physics::{PhysicsCtx, PuppetPhysics};
 use crate::render::RenderCtx;
 
@@ -32,6 +32,27 @@ pub struct ResolvedNodeHandle {
 impl ResolvedNodeHandle {
 	pub fn raw_uuid(self) -> u32 {
 		self.uuid.0
+	}
+}
+
+/// Opaque resolved parameter target for per-frame runtime values.
+///
+/// Host integrations can resolve authored parameter names once when a model is
+/// loaded, then reuse this handle for motion application without repeatedly
+/// routing through public string identifiers.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResolvedParamHandle {
+	uuid: ParamUuid,
+	name: String,
+}
+
+impl ResolvedParamHandle {
+	pub fn raw_uuid(&self) -> u32 {
+		self.uuid.0
+	}
+
+	pub fn name(&self) -> &str {
+		&self.name
 	}
 }
 
@@ -289,6 +310,25 @@ impl Puppet {
 		Ok(nodes.into_iter().map(|uuid| ResolvedNodeHandle { uuid }).collect())
 	}
 
+	pub fn resolve_param_by_name(&self, param_name: &str) -> Result<ResolvedParamHandle, SetParamError> {
+		let Some(param) = self.params.get(param_name) else {
+			return Err(SetParamError::NoParameterNamed(param_name.to_owned()));
+		};
+
+		Ok(ResolvedParamHandle {
+			uuid: param.uuid,
+			name: param_name.to_owned(),
+		})
+	}
+
+	pub fn set_parameter_by_handle(&mut self, param: &ResolvedParamHandle, value: Vec2) -> Result<(), SetParamError> {
+		self.validate_param_handle(param)?;
+		self.param_ctx
+			.as_mut()
+			.expect("Resolved parameter updates depend on initialized params.")
+			.set(param.name(), value)
+	}
+
 	pub fn set_physics_input_offset_by_handle(
 		&mut self,
 		node: ResolvedNodeHandle,
@@ -369,6 +409,38 @@ impl Puppet {
 				.set(param_name, *value)?;
 		}
 
+		self.rebuild_render_pose_from_params();
+		Ok(())
+	}
+
+	pub fn apply_post_physics_param_overrides_by_handles(
+		&mut self,
+		overrides: &[(ResolvedParamHandle, Vec2)],
+	) -> Result<(), SetParamError> {
+		if overrides.is_empty() {
+			return Ok(());
+		}
+
+		for (param, value) in overrides {
+			self.set_parameter_by_handle(param, *value)?;
+		}
+
+		self.rebuild_render_pose_from_params();
+		Ok(())
+	}
+
+	fn validate_param_handle(&self, param: &ResolvedParamHandle) -> Result<(), SetParamError> {
+		let Some(current) = self.params.get(param.name()) else {
+			return Err(SetParamError::NoParameterWithUuid(param.raw_uuid()));
+		};
+		if current.uuid != param.uuid {
+			return Err(SetParamError::NoParameterWithUuid(param.raw_uuid()));
+		}
+
+		Ok(())
+	}
+
+	fn rebuild_render_pose_from_params(&mut self) {
 		self.render_ctx
 			.as_mut()
 			.expect("Post-physics param overrides depend on initialized rendering.")
@@ -389,7 +461,6 @@ impl Puppet {
 			.as_mut()
 			.expect("Post-physics param overrides depend on initialized rendering.")
 			.update(&self.nodes, &mut self.node_comps);
-		Ok(())
 	}
 
 	/// Apply visible transform offsets after physics for the final rendered pose.
@@ -791,6 +862,84 @@ mod tests {
 				.translation
 				.x,
 			8.0
+		);
+	}
+
+	#[test]
+	fn resolved_param_handles_set_frame_values_without_public_name_lookup() {
+		let root = InoxNodeUuid(1);
+		let mouth = InoxNodeUuid(2);
+		let mut params = HashMap::new();
+		params.insert("ParamMouthOpenY".to_owned(), mouth_param(mouth));
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			params,
+		);
+		puppet.nodes.add(root, mouth, node(mouth.0, "Mouth"));
+		puppet.init_transforms();
+		puppet.init_rendering();
+		puppet.init_params();
+
+		let handle = puppet.resolve_param_by_name("ParamMouthOpenY").unwrap();
+		assert_eq!(handle.raw_uuid(), 10);
+
+		puppet.begin_frame();
+		puppet.set_parameter_by_handle(&handle, vec2(0.6, 0.0)).unwrap();
+		puppet.end_frame(0.0);
+
+		assert_eq!(
+			puppet
+				.node_comps
+				.get::<TransformStore>(mouth)
+				.unwrap()
+				.relative
+				.translation
+				.x,
+			6.0
+		);
+	}
+
+	#[test]
+	fn resolved_param_handles_apply_post_physics_overrides() {
+		let root = InoxNodeUuid(1);
+		let mouth = InoxNodeUuid(2);
+		let mut params = HashMap::new();
+		params.insert("ParamMouthOpenY".to_owned(), mouth_param(mouth));
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			params,
+		);
+		puppet.nodes.add(root, mouth, node(mouth.0, "Mouth"));
+		puppet.init_transforms();
+		puppet.init_rendering();
+		puppet.init_params();
+
+		let handle = puppet.resolve_param_by_name("ParamMouthOpenY").unwrap();
+		puppet.begin_frame();
+		puppet.end_frame(0.0);
+		puppet
+			.apply_post_physics_param_overrides_by_handles(&[(handle, vec2(0.7, 0.0))])
+			.unwrap();
+
+		assert_eq!(
+			puppet
+				.node_comps
+				.get::<TransformStore>(mouth)
+				.unwrap()
+				.relative
+				.translation
+				.x,
+			7.0
 		);
 	}
 

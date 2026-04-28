@@ -102,3 +102,18 @@ host integrations to resolve motion targets once after model load and reuse
 opaque handles during frame playback. The immediate use cases are Live2D-like
 `PartOpacity`, post-physics visible offsets, and future gesture/secondary-motion
 effects without repeated name lookup in the hot path.
+
+## 2026-04-28 resolved parameter handles
+
+Added the matching parameter-handle API:
+
+- `Puppet::resolve_param_by_name()`
+- `Puppet::set_parameter_by_handle()`
+- `Puppet::apply_post_physics_param_overrides_by_handles()`
+
+This lets host integrations resolve authored parameter names once after model
+load, then drive base motion values and post-physics presentation overrides via
+typed handles. Name-based parameter APIs remain as compatibility wrappers, but
+new Live2D-style retargeting code should prefer resolved handles so missing or
+renamed parameters fail at load/retarget setup time instead of being rediscovered
+inside every frame.

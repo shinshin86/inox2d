@@ -304,4 +304,6 @@ impl ParamCtx {
 pub enum SetParamError {
 	#[error("No parameter named {0}")]
 	NoParameterNamed(String),
+	#[error("No parameter with uuid {0}")]
+	NoParameterWithUuid(u32),
 }
