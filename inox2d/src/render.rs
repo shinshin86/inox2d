@@ -35,6 +35,9 @@ pub struct CompositeRenderCtx {
 pub struct RenderCtx {
 	/// General compact data buffers for interfacing with the GPU.
 	pub vertex_buffers: VertexBuffers,
+	base_opacity_drawables: Vec<InoxNodeUuid>,
+	composite_drawables: Vec<InoxNodeUuid>,
+	deformed_textured_meshes: Vec<InoxNodeUuid>,
 	/// All nodes that need respective draw method calls:
 	/// - including standalone parts and composite parents,
 	/// - excluding (TODO: plain mesh masks) and composite children.
@@ -59,7 +62,11 @@ impl RenderCtx {
 
 		let mut vertex_buffers = VertexBuffers::default();
 
-		let mut root_drawables_count: usize = 0;
+		let mut base_opacity_drawables = Vec::new();
+		let mut composite_drawables = Vec::new();
+		let mut deformed_textured_meshes = Vec::new();
+		let mut root_drawables_zsorted = Vec::new();
+
 		for node in nodes.iter() {
 			if !node.enabled {
 				continue;
@@ -70,11 +77,18 @@ impl RenderCtx {
 				.map(|drawable| drawable.blending.opacity)
 			{
 				comps.add(node.uuid, DrawableBaseOpacity(base_opacity));
+				base_opacity_drawables.push(node.uuid);
 			}
 
 			let drawable_kind = DrawableKind::new(node.uuid, comps, true);
 			if let Some(drawable_kind) = drawable_kind {
-				root_drawables_count += 1;
+				let parent = nodes.get_parent(node.uuid);
+				if !matches!(
+					DrawableKind::new(parent.uuid, comps, false),
+					Some(DrawableKind::Composite(_))
+				) {
+					root_drawables_zsorted.push(node.uuid);
+				}
 
 				match drawable_kind {
 					DrawableKind::TexturedMesh(components) => {
@@ -94,9 +108,12 @@ impl RenderCtx {
 						// TexturedMesh not deformed by any source does not need a DeformStack
 						if nodes_to_deform.contains(&node.uuid) {
 							comps.add(node.uuid, DeformStack::new(vert_len));
+							deformed_textured_meshes.push(node.uuid);
 						}
 					}
 					DrawableKind::Composite { .. } => {
+						composite_drawables.push(node.uuid);
+
 						// exclude non-drawable children
 						let children_list: Vec<InoxNodeUuid> = nodes
 							.get_children(node.uuid)
@@ -108,9 +125,6 @@ impl RenderCtx {
 								}
 							})
 							.collect();
-
-						// composite children are excluded from root_drawables_zsorted
-						root_drawables_count -= children_list.len();
 
 						comps.add(
 							node.uuid,
@@ -124,103 +138,74 @@ impl RenderCtx {
 			}
 		}
 
-		let mut root_drawables_zsorted = Vec::new();
-		// similarly, populate later, before render
-		root_drawables_zsorted.resize(root_drawables_count, InoxNodeUuid(0));
-
 		Self {
 			vertex_buffers,
+			base_opacity_drawables,
+			composite_drawables,
+			deformed_textured_meshes,
 			root_drawables_zsorted,
 		}
 	}
 
 	/// Reset all `DeformStack`.
-	pub(crate) fn reset(&mut self, nodes: &InoxNodeTree, comps: &mut World) {
-		for node in nodes.iter() {
-			if let Some(base_opacity) = comps.get::<DrawableBaseOpacity>(node.uuid).map(|base| base.0) {
-				comps.get_mut::<Drawable>(node.uuid).unwrap().blending.opacity = base_opacity;
-			}
+	pub(crate) fn reset(&mut self, _nodes: &InoxNodeTree, comps: &mut World) {
+		for node in &self.base_opacity_drawables {
+			let base_opacity = comps.get::<DrawableBaseOpacity>(*node).unwrap().0;
+			comps.get_mut::<Drawable>(*node).unwrap().blending.opacity = base_opacity;
+		}
 
-			if let Some(deform_stack) = comps.get_mut::<DeformStack>(node.uuid) {
-				deform_stack.reset();
-			}
+		for node in &self.deformed_textured_meshes {
+			comps.get_mut::<DeformStack>(*node).unwrap().reset();
 		}
 	}
 
 	/// Update zsort-ordered info and deform buffer content inside self, according to updated puppet.
 	pub(crate) fn update(&mut self, nodes: &InoxNodeTree, comps: &mut World) {
-		let mut root_drawable_uuid_zsort_vec = Vec::<(InoxNodeUuid, f32)>::new();
+		self.root_drawables_zsorted.sort_by(|a, b| {
+			let zsort_a = comps.get::<ZSort>(*a).unwrap();
+			let zsort_b = comps.get::<ZSort>(*b).unwrap();
+			zsort_a.total_cmp(zsort_b).reverse()
+		});
 
-		// root is definitely not a drawable.
-		for node in nodes.iter().skip(1) {
-			if !node.enabled {
-				continue;
-			}
+		for node in &self.composite_drawables {
+			// `swap()` usage is a trick that both:
+			// - returns mut borrowed comps early
+			// - does not involve any heap allocations
+			let mut zsorted_children_list = Vec::new();
+			swap(
+				&mut zsorted_children_list,
+				&mut comps
+					.get_mut::<CompositeRenderCtx>(*node)
+					.unwrap()
+					.zsorted_children_list,
+			);
 
-			if let Some(drawable_kind) = DrawableKind::new(node.uuid, comps, false) {
-				let parent = nodes.get_parent(node.uuid);
-				let node_zsort = comps.get::<ZSort>(node.uuid).unwrap().0;
+			zsorted_children_list.sort_by(|a, b| {
+				let zsort_a = comps.get::<ZSort>(*a).unwrap();
+				let zsort_b = comps.get::<ZSort>(*b).unwrap();
+				zsort_a.total_cmp(zsort_b).reverse()
+			});
 
-				if !matches!(
-					DrawableKind::new(parent.uuid, comps, false),
-					Some(DrawableKind::Composite(_))
-				) {
-					// exclude composite children
-					root_drawable_uuid_zsort_vec.push((node.uuid, node_zsort));
-				}
-
-				match drawable_kind {
-					// for Composite, update zsorted children list
-					DrawableKind::Composite { .. } => {
-						// `swap()` usage is a trick that both:
-						// - returns mut borrowed comps early
-						// - does not involve any heap allocations
-						let mut zsorted_children_list = Vec::new();
-						swap(
-							&mut zsorted_children_list,
-							&mut comps
-								.get_mut::<CompositeRenderCtx>(node.uuid)
-								.unwrap()
-								.zsorted_children_list,
-						);
-
-						zsorted_children_list.sort_by(|a, b| {
-							let zsort_a = comps.get::<ZSort>(*a).unwrap();
-							let zsort_b = comps.get::<ZSort>(*b).unwrap();
-							zsort_a.total_cmp(zsort_b).reverse()
-						});
-
-						swap(
-							&mut zsorted_children_list,
-							&mut comps
-								.get_mut::<CompositeRenderCtx>(node.uuid)
-								.unwrap()
-								.zsorted_children_list,
-						);
-					}
-					// for TexturedMesh, obtain and write deforms into vertex_buffer
-					DrawableKind::TexturedMesh(..) => {
-						// A TexturedMesh not having an associated DeformStack means it will not be deformed at all, skip.
-						if let Some(deform_stack) = comps.get::<DeformStack>(node.uuid) {
-							let render_ctx = comps.get::<TexturedMeshRenderCtx>(node.uuid).unwrap();
-							let vert_offset = render_ctx.vert_offset as usize;
-							let vert_len = render_ctx.vert_len;
-							deform_stack.combine(
-								nodes,
-								comps,
-								&mut self.vertex_buffers.deforms[vert_offset..(vert_offset + vert_len)],
-							);
-						}
-					}
-				}
-			}
+			swap(
+				&mut zsorted_children_list,
+				&mut comps
+					.get_mut::<CompositeRenderCtx>(*node)
+					.unwrap()
+					.zsorted_children_list,
+			);
 		}
 
-		root_drawable_uuid_zsort_vec.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
-		self.root_drawables_zsorted
-			.iter_mut()
-			.zip(root_drawable_uuid_zsort_vec.iter())
-			.for_each(|(old, new)| *old = new.0);
+		for node in &self.deformed_textured_meshes {
+			let deform_stack = comps.get::<DeformStack>(*node).unwrap();
+			let render_ctx = comps.get::<TexturedMeshRenderCtx>(*node).unwrap();
+			let vert_offset = render_ctx.vert_offset as usize;
+			let vert_len = render_ctx.vert_len;
+			deform_stack.combine(
+				nodes,
+				comps,
+				&mut self.vertex_buffers.deforms[vert_offset..(vert_offset + vert_len)],
+			);
+		}
 	}
 
 	pub(crate) fn root_drawables_zsorted(&self) -> &[InoxNodeUuid] {
