@@ -732,7 +732,7 @@ impl Puppet {
 
 		if let Some(physics_ctx) = self.physics_ctx.as_mut() {
 			self.frame_context.physics_ran = true;
-			let values_to_apply = physics_ctx.step(&self.physics, &self.nodes, &mut self.node_comps, dt);
+			let values_to_apply = physics_ctx.step(&self.physics, &mut self.node_comps, dt);
 
 			// TODO: Think about separating DeformStack reset and RenderCtx reset?
 			self.render_ctx

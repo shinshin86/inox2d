@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use glam::Vec2;
 
 use crate::node::components::{PhysicsModel, RigidPendulumCtx, SimplePhysics, SpringPendulumCtx, TransformStore};
+use crate::node::InoxNodeUuid;
 use crate::params::ParamUuid;
-use crate::puppet::{InoxNodeTree, Puppet, World};
+use crate::puppet::{Puppet, World};
 
 /// Global physics parameters for the puppet.
 pub struct PuppetPhysics {
@@ -62,34 +63,44 @@ impl<T: SimplePhysicsCtx> SimplePhysicsCtxCommon for T {
 pub(crate) struct PhysicsCtx {
 	/// Time since first simulation step.
 	t: f32,
-	param_uuid_to_name: HashMap<ParamUuid, String>,
+	bindings: Vec<PhysicsBinding>,
+}
+
+struct PhysicsBinding {
+	node: InoxNodeUuid,
+	param_name: String,
+	simple_physics: SimplePhysics,
 }
 
 impl PhysicsCtx {
 	/// MODIFIES puppet. In addition to initializing self, installs physics contexts in the World of components
 	pub fn new(puppet: &mut Puppet) -> Self {
+		let param_uuid_to_name: HashMap<ParamUuid, String> =
+			puppet.params.iter().map(|p| (p.1.uuid, p.0.to_owned())).collect();
+		let mut bindings = Vec::new();
+
 		for node in puppet.nodes.iter() {
 			if let Some(simple_physics) = puppet.node_comps.get::<SimplePhysics>(node.uuid) {
+				let simple_physics = simple_physics.clone();
 				match simple_physics.model_type {
 					PhysicsModel::RigidPendulum => puppet.node_comps.add(node.uuid, RigidPendulumCtx::default()),
 					PhysicsModel::SpringPendulum => puppet.node_comps.add(node.uuid, SpringPendulumCtx::default()),
 				}
+				bindings.push(PhysicsBinding {
+					node: node.uuid,
+					param_name: param_uuid_to_name
+						.get(&simple_physics.param)
+						.expect("A SimplePhysics node must reference a valid param.")
+						.to_owned(),
+					simple_physics,
+				});
 			}
 		}
 
-		Self {
-			t: 0.,
-			param_uuid_to_name: puppet.params.iter().map(|p| (p.1.uuid, p.0.to_owned())).collect(),
-		}
+		Self { t: 0., bindings }
 	}
 
-	pub fn step(
-		&mut self,
-		puppet_physics: &PuppetPhysics,
-		nodes: &InoxNodeTree,
-		comps: &mut World,
-		dt: f32,
-	) -> HashMap<String, Vec2> {
+	pub fn step(&mut self, puppet_physics: &PuppetPhysics, comps: &mut World, dt: f32) -> HashMap<String, Vec2> {
 		let mut values_to_apply = HashMap::new();
 
 		if dt == 0. {
@@ -98,36 +109,26 @@ impl PhysicsCtx {
 			panic!("Time travel has happened.");
 		}
 
-		for node in nodes.iter() {
-			if let Some(simple_physics) = comps.get::<SimplePhysics>(node.uuid) {
-				// before we use some Rust dark magic so that two components can be mutably borrowed at the same time,
-				// need to clone to workaround comps ownership problem
-				let simple_physics = simple_physics.clone();
-				let props = &(puppet_physics, &simple_physics);
-				let transform = &comps
-					.get::<TransformStore>(node.uuid)
-					.expect("All nodes with SimplePhysics must have associated TransformStore.")
-					.clone();
+		for binding in &self.bindings {
+			let props = &(puppet_physics, &binding.simple_physics);
+			let transform = &comps
+				.get::<TransformStore>(binding.node)
+				.expect("All nodes with SimplePhysics must have associated TransformStore.")
+				.clone();
 
-				let param_value = if let Some(rigid_pendulum_ctx) = comps.get_mut::<RigidPendulumCtx>(node.uuid) {
-					Some(rigid_pendulum_ctx.update(props, transform, self.t, dt))
-				} else if let Some(spring_pendulum_ctx) = comps.get_mut::<SpringPendulumCtx>(node.uuid) {
-					Some(spring_pendulum_ctx.update(props, transform, self.t, dt))
-				} else {
-					None
-				};
+			let param_value = if let Some(rigid_pendulum_ctx) = comps.get_mut::<RigidPendulumCtx>(binding.node) {
+				Some(rigid_pendulum_ctx.update(props, transform, self.t, dt))
+			} else if let Some(spring_pendulum_ctx) = comps.get_mut::<SpringPendulumCtx>(binding.node) {
+				Some(spring_pendulum_ctx.update(props, transform, self.t, dt))
+			} else {
+				None
+			};
 
-				if let Some(param_value) = param_value {
-					values_to_apply
-						.entry(
-							self.param_uuid_to_name
-								.get(&simple_physics.param)
-								.expect("A SimplePhysics node must reference a valid param.")
-								.to_owned(),
-						)
-						.and_modify(|_| panic!("Two SimplePhysics nodes reference a same param."))
-						.or_insert(param_value);
-				}
+			if let Some(param_value) = param_value {
+				values_to_apply
+					.entry(binding.param_name.to_owned())
+					.and_modify(|_| panic!("Two SimplePhysics nodes reference a same param."))
+					.or_insert(param_value);
 			}
 		}
 
