@@ -597,6 +597,44 @@ impl Puppet {
 		Ok(applied)
 	}
 
+	pub fn apply_post_physics_transform_offset_groups_by_handles(
+		&mut self,
+		groups: &[(&[ResolvedNodeHandle], TransformOffset)],
+	) -> Result<Vec<ResolvedNodeHandle>, SetPhysicsInputOffsetError> {
+		let mut applied = Vec::new();
+		for (nodes, offset) in groups {
+			for node in *nodes {
+				if self.nodes.get_node(node.uuid).is_none() {
+					return Err(SetPhysicsInputOffsetError::NoNodeWithUuid(node.raw_uuid()));
+				}
+
+				let Some(transform) = self.node_comps.get_mut::<TransformStore>(node.uuid) else {
+					continue;
+				};
+
+				transform.relative.translation += offset.translation;
+				transform.relative.rotation += offset.rotation;
+				transform.relative.scale *= offset.scale;
+				transform.relative.pixel_snap |= offset.pixel_snap;
+				self.post_physics_offset_nodes.insert(node.uuid);
+				self.frame_context
+					.pose
+					.post_physics_transform_offsets
+					.push((frame_api::FrameNodeHandle::from(*node), (*offset).clone()));
+				applied.push(*node);
+			}
+		}
+
+		if !applied.is_empty() {
+			self.transform_ctx
+				.as_mut()
+				.expect("Post-physics transform offsets depend on initialized transforms.")
+				.update(&self.nodes, &mut self.node_comps);
+		}
+
+		Ok(applied)
+	}
+
 	/// Override drawable opacity for every node whose name matches any candidate.
 	///
 	/// This is intended for runtime motion effects such as Live2D `PartOpacity`.
@@ -1314,6 +1352,64 @@ mod tests {
 				.translation
 				.x,
 			4.0
+		);
+	}
+
+	#[test]
+	fn resolved_node_handle_groups_apply_visible_offsets_with_one_update() {
+		let root = InoxNodeUuid(1);
+		let left = InoxNodeUuid(2);
+		let right = InoxNodeUuid(3);
+		let mut puppet = Puppet::new(
+			meta(),
+			PuppetPhysics {
+				pixels_per_meter: 100.0,
+				gravity: 9.8,
+			},
+			node(root.0, "Root"),
+			HashMap::new(),
+		);
+		puppet.nodes.add(root, left, node(left.0, "Hair:: Left"));
+		puppet.nodes.add(root, right, node(right.0, "Hair:: Right"));
+		puppet.init_transforms();
+
+		let left_handle = puppet.resolve_node_by_name("Hair:: Left").unwrap();
+		let right_handle = puppet.resolve_node_by_name("Hair:: Right").unwrap();
+		let mut left_offset = TransformOffset::default();
+		left_offset.translation.x = 2.0;
+		let mut right_offset = TransformOffset::default();
+		right_offset.translation.y = 3.0;
+
+		let left_handles = vec![left_handle];
+		let right_handles = vec![right_handle];
+		let groups = vec![
+			(left_handles.as_slice(), left_offset),
+			(right_handles.as_slice(), right_offset),
+		];
+		let applied = puppet
+			.apply_post_physics_transform_offset_groups_by_handles(&groups)
+			.unwrap();
+
+		assert_eq!(applied, vec![left_handle, right_handle]);
+		assert_eq!(
+			puppet
+				.node_comps
+				.get::<TransformStore>(left)
+				.unwrap()
+				.relative
+				.translation
+				.x,
+			2.0
+		);
+		assert_eq!(
+			puppet
+				.node_comps
+				.get::<TransformStore>(right)
+				.unwrap()
+				.relative
+				.translation
+				.y,
+			3.0
 		);
 	}
 
