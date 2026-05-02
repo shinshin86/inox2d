@@ -717,6 +717,20 @@ impl Puppet {
 	///
 	/// Provide elapsed time for physics, if initialized, to run. Provide `0` for the first call.
 	pub fn end_frame(&mut self, dt: f32) {
+		self.end_frame_with_phase_hook(dt, |_| {});
+	}
+
+	/// Same as [`Puppet::end_frame`], with deterministic phase markers for host-side profilers.
+	///
+	/// The callback is called before each phase starts and once with
+	/// `end_frame.end` after the last phase. Callers can measure the elapsed
+	/// time between consecutive markers without making this crate depend on a
+	/// platform-specific clock.
+	pub fn end_frame_with_phase_hook<F>(&mut self, dt: f32, mut mark_phase: F)
+	where
+		F: FnMut(&'static str),
+	{
+		mark_phase("end_frame.start");
 		self.frame_context.dt = dt;
 		let run_physics = self.physics_ctx.is_some() && dt != 0.0;
 		if self.physics_ctx.is_some() {
@@ -725,17 +739,22 @@ impl Puppet {
 
 		if run_physics {
 			if let Some(param_ctx) = self.param_ctx.as_mut() {
+				mark_phase("end_frame.pre_physics_param_transforms");
 				param_ctx.apply_transforms_only(&self.params, &self.nodes, &mut self.node_comps);
 			}
+			mark_phase("end_frame.physics_input_offsets");
 			self.apply_physics_input_offsets();
 			if let Some(transform_ctx) = self.transform_ctx.as_mut() {
+				mark_phase("end_frame.pre_physics_transform_update");
 				transform_ctx.update(&self.nodes, &mut self.node_comps);
 			}
 		} else if let Some(param_ctx) = self.param_ctx.as_mut() {
+			mark_phase("end_frame.param_apply_no_physics");
 			param_ctx.apply(&self.params, &self.nodes, &mut self.node_comps);
 		}
 
 		if run_physics {
+			mark_phase("end_frame.physics_step");
 			let values_to_apply = self
 				.physics_ctx
 				.as_mut()
@@ -743,11 +762,13 @@ impl Puppet {
 				.step(&self.physics, &mut self.node_comps, dt);
 
 			// TODO: Think about separating DeformStack reset and RenderCtx reset?
+			mark_phase("end_frame.render_reset_after_physics");
 			self.render_ctx
 				.as_mut()
 				.expect("If physics is initialized, so does params, so does rendering.")
 				.reset(&self.nodes, &mut self.node_comps);
 
+			mark_phase("end_frame.record_physics_outputs");
 			for (param_name, value) in &values_to_apply {
 				if let Some(param) = self.params.get(param_name) {
 					self.frame_context.pose.physics_outputs.push((
@@ -765,12 +786,14 @@ impl Puppet {
 				.transform_ctx
 				.as_mut()
 				.expect("If physics is initialized, so does transforms.");
+			mark_phase("end_frame.transform_reset_after_physics");
 			transform_ctx.reset(&self.nodes, &mut self.node_comps);
 
 			let param_ctx = self
 				.param_ctx
 				.as_mut()
 				.expect("If physics is initialized, so does params.");
+			mark_phase("end_frame.apply_physics_params");
 			for (param_name, value) in &values_to_apply {
 				param_ctx
 					.set(param_name, *value)
@@ -778,18 +801,22 @@ impl Puppet {
 			}
 			param_ctx.apply(&self.params, &self.nodes, &mut self.node_comps);
 
+			mark_phase("end_frame.post_physics_transform_update");
 			transform_ctx.update(&self.nodes, &mut self.node_comps);
 		}
 
 		if !run_physics {
 			if let Some(transform_ctx) = self.transform_ctx.as_mut() {
+				mark_phase("end_frame.transform_update_no_physics");
 				transform_ctx.update(&self.nodes, &mut self.node_comps);
 			}
 		}
 
 		if let Some(render_ctx) = self.render_ctx.as_mut() {
+			mark_phase("end_frame.render_context_update");
 			render_ctx.update(&self.nodes, &mut self.node_comps);
 		}
+		mark_phase("end_frame.end");
 	}
 
 	pub fn frame_context(&self) -> &frame_api::FrameContext {
