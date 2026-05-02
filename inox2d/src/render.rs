@@ -381,18 +381,48 @@ pub trait InoxRendererExt {
 	/// Draw a Drawable, which is potentially masked.
 	fn draw_drawable(&self, as_mask: bool, comps: &World, id: InoxNodeUuid);
 
+	/// Draw a Drawable with phase markers for runtime profiling.
+	fn draw_drawable_with_phase_hook<F>(&self, as_mask: bool, comps: &World, id: InoxNodeUuid, mark_phase: &mut F)
+	where
+		F: FnMut(&'static str);
+
 	/// Draw one composite. `components` must be referencing `comps`.
 	fn draw_composite(&self, as_mask: bool, comps: &World, components: &CompositeComponents, id: InoxNodeUuid);
+
+	/// Draw one composite with phase markers for runtime profiling.
+	fn draw_composite_with_phase_hook<F>(
+		&self,
+		as_mask: bool,
+		comps: &World,
+		components: &CompositeComponents,
+		id: InoxNodeUuid,
+		mark_phase: &mut F,
+	) where
+		F: FnMut(&'static str);
 
 	/// Iterate over top-level drawables (excluding masks) in zsort order,
 	/// and make draw calls correspondingly.
 	///
 	/// This effectively draws the complete puppet.
 	fn draw(&self, puppet: &Puppet);
+
+	/// Draw the complete puppet with phase markers for runtime profiling.
+	fn draw_with_phase_hook<F>(&self, puppet: &Puppet, mark_phase: F)
+	where
+		F: FnMut(&'static str);
 }
 
 impl<T: InoxRenderer> InoxRendererExt for T {
 	fn draw_drawable(&self, as_mask: bool, comps: &World, id: InoxNodeUuid) {
+		let mut mark_phase = |_| {};
+		self.draw_drawable_with_phase_hook(as_mask, comps, id, &mut mark_phase);
+	}
+
+	fn draw_drawable_with_phase_hook<F>(&self, as_mask: bool, comps: &World, id: InoxNodeUuid, mark_phase: &mut F)
+	where
+		F: FnMut(&'static str),
+	{
+		mark_phase("draw.drawable.resolve");
 		let drawable_kind = DrawableKind::new(id, comps, false).expect("Node must be a Drawable.");
 		let masks = match drawable_kind {
 			DrawableKind::TexturedMesh(ref components) => &components.drawable.masks,
@@ -402,47 +432,77 @@ impl<T: InoxRenderer> InoxRendererExt for T {
 		let mut has_masks = false;
 		if let Some(ref masks) = masks {
 			has_masks = true;
+			mark_phase("draw.masks.begin");
 			self.on_begin_masks(masks);
 			for mask in &masks.masks {
+				mark_phase("draw.mask.begin");
 				self.on_begin_mask(mask);
 
-				self.draw_drawable(true, comps, mask.source);
+				mark_phase("draw.mask.source");
+				self.draw_drawable_with_phase_hook(true, comps, mask.source, mark_phase);
 			}
+			mark_phase("draw.masked_content");
 			self.on_begin_masked_content();
 		}
 
 		match drawable_kind {
 			DrawableKind::TexturedMesh(ref components) => {
+				mark_phase("draw.textured_mesh");
 				self.draw_textured_mesh_content(as_mask, components, comps.get(id).unwrap(), id)
 			}
-			DrawableKind::Composite(ref components) => self.draw_composite(as_mask, comps, components, id),
+			DrawableKind::Composite(ref components) => {
+				mark_phase("draw.composite");
+				self.draw_composite_with_phase_hook(as_mask, comps, components, id, mark_phase);
+			}
 		}
 
 		if has_masks {
+			mark_phase("draw.masks.end");
 			self.on_end_mask();
 		}
+
+		mark_phase("draw.drawable.end");
 	}
 
 	fn draw_composite(&self, as_mask: bool, comps: &World, components: &CompositeComponents, id: InoxNodeUuid) {
+		let mut mark_phase = |_| {};
+		self.draw_composite_with_phase_hook(as_mask, comps, components, id, &mut mark_phase);
+	}
+
+	fn draw_composite_with_phase_hook<F>(
+		&self,
+		as_mask: bool,
+		comps: &World,
+		components: &CompositeComponents,
+		id: InoxNodeUuid,
+		mark_phase: &mut F,
+	) where
+		F: FnMut(&'static str),
+	{
+		mark_phase("draw.composite.lookup");
 		let render_ctx = comps.get::<CompositeRenderCtx>(id).unwrap();
 		if render_ctx.zsorted_children_list.is_empty() {
 			// Optimization: Nothing to be drawn, skip context switching
 			return;
 		}
 
+		mark_phase("draw.composite.begin");
 		self.begin_composite_content(as_mask, components, render_ctx, id);
 
 		for uuid in &render_ctx.zsorted_children_list {
+			mark_phase("draw.composite.child.resolve");
 			let drawable_kind = DrawableKind::new(*uuid, comps, false)
 				.expect("All children in zsorted_children_list should be a Drawable.");
 			match drawable_kind {
 				DrawableKind::TexturedMesh(components) => {
+					mark_phase("draw.composite.child.textured_mesh");
 					self.draw_textured_mesh_content(as_mask, &components, comps.get(*uuid).unwrap(), *uuid)
 				}
 				DrawableKind::Composite { .. } => panic!("Composite inside Composite not allowed."),
 			}
 		}
 
+		mark_phase("draw.composite.finish");
 		self.finish_composite_content(as_mask, components, render_ctx, id);
 	}
 
@@ -457,13 +517,23 @@ impl<T: InoxRenderer> InoxRendererExt for T {
 	/// - The provided `InoxRender` implementation is wrong.
 	/// - `puppet` here does not belong to the `model` this `renderer` is initialized with. This will likely result in panics for non-existent node uuids.
 	fn draw(&self, puppet: &Puppet) {
+		self.draw_with_phase_hook(puppet, |_| {});
+	}
+
+	fn draw_with_phase_hook<F>(&self, puppet: &Puppet, mut mark_phase: F)
+	where
+		F: FnMut(&'static str),
+	{
+		mark_phase("draw.start");
 		for uuid in &puppet
 			.render_ctx
 			.as_ref()
 			.expect("RenderCtx of puppet must be initialized before calling draw().")
 			.root_drawables_zsorted
 		{
-			self.draw_drawable(false, &puppet.node_comps, *uuid);
+			mark_phase("draw.root_drawable");
+			self.draw_drawable_with_phase_hook(false, &puppet.node_comps, *uuid, &mut mark_phase);
 		}
+		mark_phase("draw.end");
 	}
 }
