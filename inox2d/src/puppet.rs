@@ -718,21 +718,29 @@ impl Puppet {
 	/// Provide elapsed time for physics, if initialized, to run. Provide `0` for the first call.
 	pub fn end_frame(&mut self, dt: f32) {
 		self.frame_context.dt = dt;
-		if let Some(param_ctx) = self.param_ctx.as_mut() {
+		let run_physics = self.physics_ctx.is_some() && dt != 0.0;
+		if self.physics_ctx.is_some() {
+			self.frame_context.physics_ran = true;
+		}
+
+		if run_physics {
+			if let Some(param_ctx) = self.param_ctx.as_mut() {
+				param_ctx.apply_transforms_only(&self.params, &self.nodes, &mut self.node_comps);
+			}
+			self.apply_physics_input_offsets();
+			if let Some(transform_ctx) = self.transform_ctx.as_mut() {
+				transform_ctx.update(&self.nodes, &mut self.node_comps);
+			}
+		} else if let Some(param_ctx) = self.param_ctx.as_mut() {
 			param_ctx.apply(&self.params, &self.nodes, &mut self.node_comps);
 		}
 
-		if self.physics_ctx.is_some() {
-			self.apply_physics_input_offsets();
-		}
-
-		if let Some(transform_ctx) = self.transform_ctx.as_mut() {
-			transform_ctx.update(&self.nodes, &mut self.node_comps);
-		}
-
-		if let Some(physics_ctx) = self.physics_ctx.as_mut() {
-			self.frame_context.physics_ran = true;
-			let values_to_apply = physics_ctx.step(&self.physics, &mut self.node_comps, dt);
+		if run_physics {
+			let values_to_apply = self
+				.physics_ctx
+				.as_mut()
+				.expect("Physics must be initialized to run physics.")
+				.step(&self.physics, &mut self.node_comps, dt);
 
 			// TODO: Think about separating DeformStack reset and RenderCtx reset?
 			self.render_ctx
@@ -771,6 +779,12 @@ impl Puppet {
 			param_ctx.apply(&self.params, &self.nodes, &mut self.node_comps);
 
 			transform_ctx.update(&self.nodes, &mut self.node_comps);
+		}
+
+		if !run_physics {
+			if let Some(transform_ctx) = self.transform_ctx.as_mut() {
+				transform_ctx.update(&self.nodes, &mut self.node_comps);
+			}
 		}
 
 		if let Some(render_ctx) = self.render_ctx.as_mut() {

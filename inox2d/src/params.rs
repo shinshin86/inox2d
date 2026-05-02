@@ -77,12 +77,36 @@ pub struct Param {
 }
 
 impl Param {
+	fn should_apply_binding(mode: ParamApplyMode, values: &BindingValues) -> bool {
+		match mode {
+			ParamApplyMode::All => true,
+			ParamApplyMode::TransformOnly => matches!(
+				values,
+				BindingValues::TransformTX(_)
+					| BindingValues::TransformTY(_)
+					| BindingValues::TransformSX(_)
+					| BindingValues::TransformSY(_)
+					| BindingValues::TransformRX(_)
+					| BindingValues::TransformRY(_)
+					| BindingValues::TransformRZ(_)
+			),
+		}
+	}
+
 	/// Internal function that modifies puppet components according to one param set.
 	/// Must be only called ONCE per frame to ensure correct behavior.
 	///
 	/// End users may repeatedly apply a same parameter for multiple times in between frames,
 	/// but other facilities should be present to make sure this `apply()` is only called once per parameter.
 	pub(crate) fn apply(&self, val: Vec2, nodes: &InoxNodeTree, comps: &mut World) {
+		self.apply_with_mode(val, nodes, comps, ParamApplyMode::All);
+	}
+
+	pub(crate) fn apply_transforms_only(&self, val: Vec2, nodes: &InoxNodeTree, comps: &mut World) {
+		self.apply_with_mode(val, nodes, comps, ParamApplyMode::TransformOnly);
+	}
+
+	fn apply_with_mode(&self, val: Vec2, nodes: &InoxNodeTree, comps: &mut World, mode: ParamApplyMode) {
 		let val = val.clamp(self.min, self.max);
 		let val_normed = (val - self.min) / (self.max - self.min);
 
@@ -115,6 +139,10 @@ impl Param {
 
 		// Apply offset on each binding
 		for binding in &self.bindings {
+			if !Self::should_apply_binding(mode, &binding.values) {
+				continue;
+			}
+
 			let range_in = InterpRange::new(
 				vec2(self.axis_points.x[x_mindex], self.axis_points.y[y_mindex]),
 				vec2(self.axis_points.x[x_maxdex], self.axis_points.y[y_maxdex]),
@@ -258,6 +286,12 @@ impl Param {
 	}
 }
 
+#[derive(Clone, Copy)]
+enum ParamApplyMode {
+	All,
+	TransformOnly,
+}
+
 /// Additional struct attached to a puppet for animating through params.
 pub struct ParamCtx {
 	values: HashMap<String, Vec2>,
@@ -294,6 +328,23 @@ impl ParamCtx {
 			// TODO: a correct implementation should not fail on param value (0, 0)
 			if *val != Vec2::ZERO {
 				params.get(param_name).unwrap().apply(*val, nodes, comps);
+			}
+		}
+	}
+
+	/// Apply only transform bindings for a physics input prepass.
+	pub(crate) fn apply_transforms_only(
+		&self,
+		params: &HashMap<String, Param>,
+		nodes: &InoxNodeTree,
+		comps: &mut World,
+	) {
+		for (param_name, val) in self.values.iter() {
+			if *val != Vec2::ZERO {
+				params
+					.get(param_name)
+					.unwrap()
+					.apply_transforms_only(*val, nodes, comps);
 			}
 		}
 	}
